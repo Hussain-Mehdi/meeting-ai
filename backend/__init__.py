@@ -1,0 +1,2 @@
+"""Meeting AI local backend."""
+

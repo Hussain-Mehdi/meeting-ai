@@ -1,0 +1,17 @@
+.processing { margin-top: 28px; background: #fff; border: 1px solid #e1e1dc; border-radius: 10px; padding: 18px; box-shadow: 0 4px 18px #18181408; }
+.processing.failed { border-color: #ecd0cc; background: #fffafa; }
+.processing-head { display: flex; justify-content: space-between; align-items: start; }
+.processing-head div { display: grid; gap: 5px; }
+.processing-head b { font-size: 14px; }
+.processing-head span { font-size: 12px; color: #777; }
+.processing-head strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.progress { height: 5px; background: #ecece8; border-radius: 5px; margin: 16px 0; overflow: hidden; }
+.progress i { height: 100%; display: block; background: #4c7955; transition: width .35s ease; }
+.processing.failed .progress i { background: #b64a42; }
+.processing-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.processing-steps div { display: grid; grid-template-columns: 16px 1fr; gap: 2px 6px; color: #999; font-size: 11px; }
+.processing-steps div.done { color: #4c7955; }
+.processing-steps b { font-weight: 500; }
+.processing-steps em { grid-column: 2; font-style: normal; color: #aaa; }
+.processing > p { font-size: 12px; color: #9f3e37; margin: 14px 0 0; line-height: 1.5; }
+
