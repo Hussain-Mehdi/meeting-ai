@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     user_aliases: str = "Hussain,Husain"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen3:14b"
+    ollama_num_ctx: int = 32768
     whisper_model: str = "large-v3"
     whisper_language: str = ""
     whisper_task: str = "translate"

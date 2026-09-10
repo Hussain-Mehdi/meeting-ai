@@ -29,10 +29,20 @@ CREATE TABLE IF NOT EXISTS tasks (
  evidence TEXT, status TEXT DEFAULT 'open', created_at TEXT NOT NULL,
  FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS requested_changes (
+ id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, requested_of TEXT NOT NULL,
+ change_text TEXT NOT NULL, deadline_original TEXT, deadline_normalized TEXT,
+ priority TEXT, confidence TEXT, evidence TEXT,
+ FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS goals (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS key_topics (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS next_steps (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
+CREATE TABLE IF NOT EXISTS meeting_info_edits (
+ meeting_id TEXT PRIMARY KEY, title TEXT NOT NULL, people_json TEXT NOT NULL,
+ updated_at TEXT NOT NULL, FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
 """
 
 
@@ -87,19 +97,32 @@ class Database:
 
     def save_analysis(self, meeting_id: str, analysis: MeetingAnalysis, path: Path):
         with self.connection() as db:
+            manual = db.execute("SELECT title,people_json FROM meeting_info_edits WHERE meeting_id=?", (meeting_id,)).fetchone()
+            title = manual["title"] if manual else analysis.meeting.title
             db.execute("UPDATE meetings SET title=?,summary=?,analysis_path=?,status='completed',error=NULL WHERE id=?",
-                       (analysis.meeting.title, analysis.summary, str(path), meeting_id))
-            for table in ("people", "tasks", "decisions", "goals", "key_topics", "next_steps"):
+                       (title, analysis.summary, str(path), meeting_id))
+            for table in ("people", "tasks", "requested_changes", "decisions", "goals", "key_topics", "next_steps"):
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             for p in analysis.people_mentioned:
                 db.execute("INSERT INTO people VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, meeting_id, p.name, "mentioned", p.context, p.importance))
             for p in analysis.attendees:
                 db.execute("INSERT INTO people VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, meeting_id, p.name, "attendee", "", p.confidence))
+            if manual:
+                db.execute("DELETE FROM people WHERE meeting_id=? AND type='mentioned'", (meeting_id,))
+                for p in json.loads(manual["people_json"]):
+                    db.execute("INSERT INTO people VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, meeting_id, p["name"], "mentioned", p.get("context", ""), p.get("importance", "medium")))
             for task in analysis.tasks:
                 deadline = task.deadline
                 db.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,'open',?)", (uuid.uuid4().hex, meeting_id, task.owner, task.task,
                     deadline.original if deadline else None, deadline.normalized if deadline else None,
                     task.priority, task.confidence, task.evidence, datetime.now(timezone.utc).isoformat()))
+            for change in analysis.requested_changes:
+                deadline = change.deadline
+                db.execute("INSERT INTO requested_changes VALUES(?,?,?,?,?,?,?,?,?)", (
+                    uuid.uuid4().hex, meeting_id, change.requested_of, change.change,
+                    deadline.original if deadline else None, deadline.normalized if deadline else None,
+                    change.priority, change.confidence, change.evidence,
+                ))
             for table, values in (("decisions", analysis.decisions), ("goals", analysis.goals), ("key_topics", analysis.key_topics),
                                   ("next_steps", analysis.next_steps)):
                 db.executemany(f"INSERT INTO {table} VALUES(?,?,?)", [(uuid.uuid4().hex, meeting_id, x) for x in values])
@@ -107,7 +130,7 @@ class Database:
     def clear_analysis(self, meeting_id: str):
         """Remove derived claims while preserving the meeting, recording, and transcript."""
         with self.connection() as db:
-            for table in ("people", "tasks", "decisions", "goals", "key_topics", "next_steps"):
+            for table in ("people", "tasks", "requested_changes", "decisions", "goals", "key_topics", "next_steps"):
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             db.execute("UPDATE meetings SET summary='', analysis_path=NULL WHERE id=?", (meeting_id,))
 
@@ -117,7 +140,9 @@ class Database:
                 term = f"%{query}%"
                 rows = db.execute("""SELECT DISTINCT m.* FROM meetings m LEFT JOIN transcript_segments s ON s.meeting_id=m.id
                   LEFT JOIN tasks t ON t.meeting_id=m.id LEFT JOIN people p ON p.meeting_id=m.id
-                  WHERE m.title LIKE ? OR m.summary LIKE ? OR s.text LIKE ? OR t.task LIKE ? OR p.name LIKE ? ORDER BY m.started_at DESC""", (term,)*5).fetchall()
+                  LEFT JOIN requested_changes r ON r.meeting_id=m.id
+                  WHERE m.title LIKE ? OR m.summary LIKE ? OR s.text LIKE ? OR t.task LIKE ? OR p.name LIKE ?
+                  OR r.change_text LIKE ? ORDER BY m.started_at DESC""", (term,)*6).fetchall()
             else:
                 rows = db.execute("SELECT * FROM meetings ORDER BY started_at DESC").fetchall()
             return [dict(x) for x in rows]
@@ -127,7 +152,7 @@ class Database:
             row = db.execute("SELECT * FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not row: return None
             result = dict(row)
-            for table in ("people", "tasks", "decisions", "goals", "key_topics", "next_steps"):
+            for table in ("people", "tasks", "requested_changes", "decisions", "goals", "key_topics", "next_steps"):
                 result[table] = [dict(x) for x in db.execute(f"SELECT * FROM {table} WHERE meeting_id=?", (meeting_id,))]
             audio = Path(result["audio_path"]) if result.get("audio_path") else None
             candidates = [audio, audio.parent / "recording-system.wav", audio.parent / "recording-microphone.wav"] if audio else []
@@ -155,3 +180,46 @@ class Database:
         with self.connection() as db:
             changed = db.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id)).rowcount
         return bool(changed)
+
+    def update_meeting_info(self, meeting_id: str, title: str, people_mentioned: list[dict]):
+        """Update user-controlled metadata without changing any generated analysis content."""
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("Meeting title cannot be empty")
+
+        clean_people = []
+        seen = set()
+        for person in people_mentioned:
+            name = str(person.get("name", "")).strip()
+            if not name:
+                raise ValueError("A meeting member name cannot be empty")
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_people.append({
+                "name": name,
+                "context": str(person.get("context", "")).strip(),
+                "importance": person.get("importance", "medium"),
+            })
+
+        with self.connection() as db:
+            meeting = db.execute("SELECT status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise KeyError("Meeting not found")
+            if meeting["status"] != "completed":
+                raise ValueError("Meeting information can only be edited after analysis is completed")
+
+            now = datetime.now(timezone.utc).isoformat()
+            db.execute("UPDATE meetings SET title=? WHERE id=?", (clean_title, meeting_id))
+            db.execute("DELETE FROM people WHERE meeting_id=? AND type='mentioned'", (meeting_id,))
+            for person in clean_people:
+                db.execute("INSERT INTO people VALUES(?,?,?,?,?,?)", (
+                    uuid.uuid4().hex, meeting_id, person["name"], "mentioned",
+                    person["context"], person["importance"],
+                ))
+            db.execute("""INSERT INTO meeting_info_edits(meeting_id,title,people_json,updated_at)
+                VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET
+                title=excluded.title,people_json=excluded.people_json,updated_at=excluded.updated_at""",
+                (meeting_id, clean_title, json.dumps(clean_people), now))
+        return self.get_meeting(meeting_id)

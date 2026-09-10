@@ -87,7 +87,7 @@ A weakly supported claim must not be included simply because a numeric confidenc
 4. SUMMARY RULES
 ==================================================
 
-Produce an executive summary of 3-5 natural professional sentences.
+Produce a comprehensive executive summary of 5-8 natural professional sentences.
 
 The summary should answer, when supported:
 
@@ -95,6 +95,9 @@ The summary should answer, when supported:
 2. What the most important discussion was.
 3. What was resolved, agreed, discovered, or left unresolved.
 4. What concrete follow-up will happen.
+5. What {user_name} was explicitly asked or committed to do.
+6. What other named or unidentified participants are responsible for.
+7. What product, design, code, process, or content changes were requested.
 
 The summary must:
 - synthesize rather than narrate chronologically
@@ -211,6 +214,9 @@ C. first-person commitment:
 D. clear team commitment:
    "We'll deploy this after testing."
 
+An explicit assignment is a task even when the transcript does not contain a later verbal
+acceptance. For example, "{user_name}, please fix the logos" is a task owned by {user_name}.
+
 Do NOT create tasks from:
 - general observations
 - problems that need attention
@@ -247,6 +253,45 @@ OWNER RULES:
 - unidentified system speaker commitment => owner = "unknown_participant"
 - generic collective statements such as "we need to..." do not establish a specific owner
   unless responsibility is clear from context
+
+USER ACTION AUDIT:
+- Before finishing extraction, scan the entire source again specifically for {user_name}.
+- Capture direct uses of "{user_name}" followed by an instruction, request, responsibility,
+  correction, deliverable, follow-up, or deadline.
+- Capture first-person commitments spoken under the "{user_name}" source.
+- Canonicalize the owner exactly as "{user_name}"; do not return "you", "user", or "me".
+- Split separate requested modifications into separate tasks.
+- Do not bury actionable requests only in the summary or next steps.
+
+==================================================
+8A. REQUESTED-CHANGE RULES
+==================================================
+
+A requested change is an explicit instruction or request to modify a product, design, screen,
+logo, feature, application, code path, data, process, document, configuration, or deliverable.
+
+Examples:
+- "{user_name}, fix the logos before the demo."
+- "Replace the placeholder logo with the correct organization logo."
+- "Make the live-game video use a segment where the camera tracks the action."
+- "Check why horizontal view stopped working after the video was added."
+
+Requested changes differ from confirmed tasks:
+- requested_changes preserve what someone asked to be changed, even when acceptance is absent
+- tasks represent explicit assignments or commitments with a supported owner
+- an explicitly assigned change may correctly appear in both sections because the sections answer
+  different questions
+
+For every requested change:
+- state one concrete change
+- preserve who it was requested of
+- use "{user_name}" only when the request explicitly names or clearly addresses {user_name}
+- use a real person's name only when supported
+- use "team" for an explicit group request
+- use "unknown_participant" when the recipient is unclear
+- preserve a short exact evidence quote
+- preserve a deadline only when it is directly attached
+- never turn a general complaint into a requested change unless an action was actually requested
 
 ==================================================
 9. DEADLINE RULES
@@ -421,6 +466,7 @@ Return exactly one valid JSON object with these keys:
   "unresolved_items": [],
   "people_mentioned": [],
   "tasks": [],
+  "requested_changes": [],
   "next_steps": [],
   "important_entities": []
 }}
@@ -488,6 +534,7 @@ For each valid task include:
 
 Task requirements:
 - explicit assignment, accepted request, or clear commitment
+- an explicit assignment does not require a separately recorded acceptance
 - one action per record
 - exact short supporting quote
 - do not create a task from vague discussion
@@ -496,6 +543,29 @@ Task requirements:
   "Other participant" speech
 - deadline only when explicitly associated with that task
 - high priority only when explicitly urgent/critical/blocking
+
+Before completing the chunk, perform a second task scan focused only on "{user_name}":
+- instructions that explicitly name {user_name}
+- direct changes clearly requested of {user_name}
+- first-person commitments from the {user_name} source
+- deadlines attached to those actions
+
+REQUESTED CHANGES
+For every explicit modification request include:
+
+{{
+  "requested_of": "{user_name}|real person|team|unknown_participant",
+  "change": "",
+  "deadline": null,
+  "original_deadline_phrase": null,
+  "priority": "medium",
+  "confidence": "low",
+  "evidence": "",
+  "source_chunk_id": "{chunk_id}"
+}}
+
+Capture concrete requested changes even when no acceptance is recorded. Do not infer the recipient.
+Keep separate changes as separate records and retain the exact supporting quote.
 
 NEXT STEPS
 Capture explicitly supported workflow follow-up.
@@ -520,6 +590,87 @@ Each entity should contain:
 - name
 - type
 - context
+
+Transcript chunk:
+{transcript}
+"""
+
+
+ACTION_AUDIT_PROMPT = """
+Perform a dedicated action audit of this transcript chunk for {user_name}.
+
+Return only valid JSON with exactly these keys:
+
+{{
+  "tasks": [],
+  "requested_changes": []
+}}
+
+TASKS
+- Capture every explicit assignment, accepted request, or first-person commitment.
+- Process every transcript line and retain every distinct supported action; do not stop after
+  finding actions for {user_name}.
+- An instruction such as "{user_name}, please fix the logos" is a task for {user_name};
+  a separate spoken acceptance is not required.
+- A named-person imperative such as "Jason, keep one live game available" is a task for Jason.
+- A definite named future commitment such as "Robert will arrange the API conversation" is a
+  task for Robert.
+- An explicit group instruction such as "Team, replace the footage" is a task owned by "team".
+- Capture first-person commitments under the {user_name} source as owned by {user_name}.
+- Use "unknown_participant" for a first-person commitment under Other participant when no
+  real identity is established.
+- Keep one concrete action per task and preserve an exact short evidence quote.
+- Start task text with the action verb, such as Fix, Replace, Check, Keep, Send, or Arrange.
+- Never infer an owner from a general concern, product problem, or "we should" statement.
+- When an assignment and a nearby acceptance describe the same work, merge them into one task
+  and preserve any deadline from either statement, such as "today" or "before the demo".
+
+Task shape:
+{{
+  "owner": "",
+  "action": "",
+  "task": "",
+  "deadline": null,
+  "original_deadline_phrase": null,
+  "priority": "medium",
+  "status": "open",
+  "confidence": "low",
+  "evidence": "",
+  "source_chunk_id": "{chunk_id}"
+}}
+
+REQUESTED CHANGES
+- Capture every explicit request to modify a screen, logo, design, feature, video, application,
+  API, code, data, process, configuration, document, or deliverable.
+- Keep requests even when no acceptance is recorded.
+- Use requested_of "{user_name}" only when explicitly named or unambiguously addressed,
+  a supported real name for another person, "team" for an explicit group, or
+  "unknown_participant" when the recipient is unclear.
+- Do not convert complaints or observations into changes unless modification was requested.
+- Do not place ordinary coordination work, outreach, scheduling, fundraising, introductions, or
+  access-arranging in requested_changes unless the speaker explicitly asks to modify an artifact,
+  system, configuration, process, or deliverable. Keep such work under tasks only.
+- Preserve an exact short evidence quote.
+
+Requested-change shape:
+{{
+  "requested_of": "",
+  "change": "",
+  "deadline": null,
+  "original_deadline_phrase": null,
+  "priority": "medium",
+  "confidence": "low",
+  "evidence": "",
+  "source_chunk_id": "{chunk_id}"
+}}
+
+FINAL CHECK
+1. Scan again for every explicit occurrence of "{user_name}".
+2. Scan for please, kindly, fix, update, change, replace, keep, check, send, create, make,
+   review, finish, deliver, "will", and deadline language.
+3. Verify every named-person instruction and every definite "NAME will ACTION" statement is
+   represented once.
+4. Do not add unsupported actions merely to fill arrays.
 
 Transcript chunk:
 {transcript}
@@ -587,7 +738,7 @@ If any answer creates material uncertainty, omit or weaken the claim rather than
 SUMMARY
 ==================================================
 
-Write 3-5 professional sentences.
+Write 5-8 specific professional sentences.
 
 Cover, when supported:
 
@@ -595,6 +746,9 @@ Cover, when supported:
 2. most important discussion
 3. key confirmed outcomes or unresolved issue
 4. concrete follow-up
+5. {user_name}'s confirmed tasks and directly requested changes
+6. other participants' responsibilities and commitments
+7. major requested product, design, code, or process changes
 
 The summary should be specific enough that someone who missed the meeting can understand
 what materially happened.
@@ -680,6 +834,22 @@ A final task must have:
 - direct evidence
 - sufficient confidence
 
+An explicit assignment is sufficient evidence of a task; it does not require a later acceptance.
+Before returning the final JSON, audit all candidates and the source specifically for:
+- every instruction that explicitly names {user_name}
+- every first-person commitment under the {user_name} source
+- every deadline attached to {user_name}'s work
+- every named or unidentified other-participant commitment
+- every named-person imperative and definite "NAME will ACTION" commitment
+
+Use owner "{user_name}" exactly for the user's tasks so the application can reliably place them
+under the personal action plan.
+
+Every distinct supported action from the dedicated action-audit candidates must be represented.
+If an assignment and acceptance refer to the same action, merge them but carry forward the most
+specific action wording, explicit priority, and any attached deadline. Do not discard a distinct
+owner/action merely to shorten the report.
+
 Reject:
 - vague intentions
 - suggestions
@@ -698,6 +868,25 @@ Deduplicate tasks based on:
 Do not combine distinct actions into a single task.
 
 Maintain one canonical owner representation.
+
+==================================================
+REQUESTED CHANGES
+==================================================
+
+Preserve each explicit requested modification as a separate requested_changes record.
+
+For each record:
+- describe exactly what must change
+- identify requested_of only when supported
+- retain the exact evidence quote
+- retain an attached deadline when present
+- distinguish urgent demo/client/blocker work from ordinary priority
+
+Use requested_of "{user_name}" for requests explicitly directed to the user, a supported real
+name for another person, "team" for group requests, or "unknown_participant" when unclear.
+Do not omit a concrete requested change merely because the recipient did not verbally accept it.
+Do not duplicate ordinary coordination, outreach, scheduling, or access-arranging tasks in this
+section unless they explicitly modify a system, process, configuration, or deliverable.
 
 Priority:
 - high only when urgency/criticality/blocker/dependency is supported
@@ -790,6 +979,8 @@ Before returning JSON:
 11. Verify next steps are grounded.
 12. Verify JSON exactly matches the schema.
 13. Verify output contains no Markdown or commentary.
+14. Verify every explicit {user_name} assignment is represented in tasks.
+15. Verify every concrete modification request is represented in requested_changes.
 
 Return only the complete valid JSON object.
 """

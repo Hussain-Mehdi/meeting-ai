@@ -139,6 +139,7 @@ Long-running transcription and Ollama work execute in worker threads with `async
 | Meeting analysis | Ollama with `qwen3:14b` | Local evidence extraction and structured meeting reports |
 | Validation | Pydantic | Enforce the final report schema |
 | Persistence | SQLite and JSON/text files | Store meetings, transcripts, reports, people, and tasks |
+| PDF export | ReportLab | Generate searchable completed-meeting reports locally on demand |
 | Frontend | React, TypeScript, Vite | Local meeting and task interface |
 | Icons | Lucide React | Interface icons |
 | Testing | pytest, FastAPI TestClient, TypeScript compiler, Vite build | Backend and frontend verification |
@@ -165,6 +166,7 @@ meeting-ai/
 │   ├── analysis/prompts.py         System, extraction, and final prompts
 │   ├── analysis/ollama.py          Ollama client, chunking, repair, validation
 │   ├── analysis/schemas.py         Final Pydantic report schema
+│   ├── reports/pdf.py               Local PDF report renderer
 │   ├── analysis/dates.py           Relative-deadline normalization
 │   ├── database/db.py              SQLite schema and queries
 │   ├── detection/meet_detector.py  Chrome Meet-tab detection
@@ -205,6 +207,7 @@ Meeting AI reads `.env` through `pydantic-settings`. Unknown environment variabl
 | `USER_ALIASES` | `Hussain,Husain` | Comma-separated aliases used by the My Tasks query |
 | `OLLAMA_HOST` | `http://localhost:11434` | Local Ollama API |
 | `OLLAMA_MODEL` | `qwen3:14b` | Local meeting-analysis model |
+| `OLLAMA_NUM_CTX` | `32768` | Ollama context window allocated for prompts, evidence, and report output |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model |
 | `WHISPER_LANGUAGE` | empty | Automatic source-language detection |
 | `WHISPER_TASK` | `translate` | Translate recognized speech to English; use `transcribe` to preserve language |
@@ -367,9 +370,10 @@ Meeting analysis uses local Ollama with deterministic generation settings:
 - `think: false`;
 - temperature `0`;
 - structured JSON schemas supplied to Ollama;
+- a 32,768-token context allocation by default;
 - long request timeouts suitable for a 14B local model.
 
-### 10.1 Stage 1: evidence extraction
+### 10.1 Stage 1: evidence extraction and action audit
 
 Long transcripts are split primarily at line boundaries into chunks of approximately 12,000 characters with a small line overlap. Each chunk is analyzed into candidate evidence such as:
 
@@ -379,10 +383,11 @@ Long transcripts are split primarily at line boundaries into chunks of approxima
 - decisions;
 - named people;
 - tasks, owners, evidence, priority, confidence, and deadlines;
+- explicit requested product, design, code, content, and process changes;
 - next steps;
 - useful named entities.
 
-Every task candidate receives a deterministic source chunk ID. The model is instructed to keep empty arrays instead of inventing content.
+Every task and requested-change candidate receives a deterministic source chunk ID. Each chunk receives a general evidence pass and a separate action audit focused on Hussain's assignments, first-person commitments, other-participant commitments, modification requests, and attached deadlines. The model is instructed to keep empty arrays instead of inventing content.
 
 ### 10.2 Stage 2: final synthesis
 
@@ -394,7 +399,7 @@ The final prompt receives:
 - the full source transcript for meetings up to 16,000 characters;
 - the meeting date for relative-deadline normalization.
 
-The prompt asks the model to consolidate duplicates, separate proposals from decisions, require evidence for tasks, avoid inferred attendees, and write a concise professional summary.
+The prompt asks the model to consolidate duplicates, separate proposals from decisions, require evidence for tasks, avoid inferred attendees, and write a comprehensive professional summary covering Hussain, other participants, requested changes, outcomes, and follow-up.
 
 ### 10.3 Deterministic safety layer
 
@@ -406,7 +411,11 @@ Model output is repaired and checked before Pydantic validation. The code:
 - converts numeric confidence to `low`, `medium`, or `high`;
 - normalizes priorities and person importance;
 - verifies task evidence against the transcript;
-- rejects unsupported task owners;
+- canonicalizes configured user aliases to `Hussain`;
+- validates owners against cited evidence and narrow nearby context;
+- recovers minor model evidence wording differences while retaining actual transcript wording;
+- validates requested changes independently from confirmed tasks;
+- rejects unsupported task owners and requested-change recipients;
 - verifies deadline phrases against the transcript;
 - converts supported deadline variants to the final schema;
 - rejects artificial speaker labels as people;
@@ -435,6 +444,7 @@ The saved report contains:
 - attendees, currently forced empty;
 - people mentioned with context and importance;
 - tasks with owner, action, deadline, priority, confidence, and evidence;
+- requested changes with recipient, requested modification, deadline, priority, confidence, and evidence;
 - next steps.
 
 The final report and UI intentionally do not include an **Open Questions** section.
@@ -590,6 +600,7 @@ Database: `data/meetings.db`
 | `transcript_segments` | Ordered timestamps, speaker source, and segment text |
 | `people` | Mentioned people and any authoritative attendees |
 | `tasks` | Owner, task, deadline, priority, confidence, evidence, and completion status |
+| `requested_changes` | Explicit modification requests, recipients, deadlines, priority, confidence, and evidence |
 | `decisions` | Confirmed decision strings |
 | `goals` | Goal strings |
 | `key_topics` | Topic strings |
@@ -616,8 +627,10 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/status` | Runtime state, stage, progress, and errors |
 | `GET` | `/meetings` | List meetings; optional `q` search query |
 | `GET` | `/meetings/{id}` | Meeting report, tasks, artifact availability, and status |
+| `GET` | `/meetings/{id}/report.pdf` | Download the latest completed report as a local PDF |
 | `GET` | `/meetings/{id}/transcript` | Timestamped transcript segments |
 | `GET` | `/meetings/{id}/analysis` | Current `analysis.json` |
+| `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after analysis completes |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Tasks owned by configured user aliases |
 | `PATCH` | `/tasks/{id}` | Change status to `open` or `completed` |
@@ -644,6 +657,23 @@ Task update request:
 }
 ```
 
+Completed meeting info update request:
+
+```json
+{
+  "title": "Weekly engineering sync",
+  "people_mentioned": [
+    {
+      "name": "Ahmad Khan",
+      "context": "Will review the release plan.",
+      "importance": "high"
+    }
+  ]
+}
+```
+
+The server rejects this request until the meeting status is `completed`. It updates only the meeting title and `mentioned` people records. Date/time, transcript, summary, goals, topics, decisions, tasks, and next steps are not changed. These manual corrections are stored separately and reapplied after a later analysis retry.
+
 ## 17. Frontend behavior
 
 The React application polls status, meetings, and personal tasks every 2.5 seconds.
@@ -655,9 +685,11 @@ Pages:
 - **My Tasks**: open and completed personal tasks;
 - **Search**: searches titles, summaries, transcripts, tasks, and people through the backend;
 - **Settings**: current profile, AI models, Ollama status, audio status, storage, and privacy;
-- **Meeting detail**: summary, personal tasks, goals, topics, decisions, people, other tasks, next steps, transcript, and recovery controls.
+- **Meeting detail**: comprehensive summary, Hussain's action plan, requested changes, other-participant actions, goals, topics, decisions, people, next steps, PDF download, transcript, recovery controls, and completed-meeting info editing.
 
-The full transcript is loaded only when the disclosure is opened. Failed and completed meetings show retry controls when a recording or transcript exists.
+The PDF download is available only after analysis completes. It is rendered from the current SQLite record rather than the older `analysis.json`, so a corrected meeting title, corrected people, and current task completion statuses are included. Open and completed tasks are separated, internal owner sentinels receive readable labels, and Urdu or Arabic text receives right-to-left shaping. Generation happens in memory, no stale export is retained, and HTTP responses use `no-store` caching for meeting privacy.
+
+The full transcript is loaded only when the disclosure is opened. Failed and completed meetings show retry controls when a recording or transcript exists. The edit button appears only for completed meetings; date, start time, end time, and duration are read-only in the form.
 
 ## 18. Scripts
 
@@ -828,7 +860,7 @@ Every future change must preserve these constraints:
 - Reliable participant metadata is unavailable, so attendees remain empty.
 - Speaker diarization is not implemented; source labels are used instead.
 - CPU transcription with `large-v3` and local inference with a 14B model can be slow.
-- The UI uses a hard-coded greeting and hard-coded Hussain/Husain task filtering in addition to backend aliases; full profile-driven frontend rendering remains future work.
+- The UI greeting remains hard-coded; meeting-report ownership is supplied by configured backend aliases, with a small frontend fallback for older responses.
 - `MAX_RECORDING_HOURS` exists in configuration but is not currently enforced.
 - Model download requires internet on first use; normal meeting processing is local afterward.
 

@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ from backend.analysis.dates import normalize_deadline
 from backend.analysis.prompts import (
     SYSTEM_PROMPT,
     CHUNK_PROMPT,
+    ACTION_AUDIT_PROMPT,
     FINAL_PROMPT,
 )
 from backend.analysis.schemas import MeetingAnalysis
@@ -101,7 +103,10 @@ CHUNK_JSON_SCHEMA = {
                     },
                     "priority": {"type": "string"},
                     "status": {"type": "string"},
-                    "confidence": {"type": "number"},
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
                     "evidence": {"type": "string"},
                     "source_chunk_id": {"type": "string"},
                 },
@@ -109,8 +114,52 @@ CHUNK_JSON_SCHEMA = {
                     "owner",
                     "action",
                     "task",
+                    "deadline",
+                    "original_deadline_phrase",
                     "priority",
                     "status",
+                    "confidence",
+                    "evidence",
+                    "source_chunk_id",
+                ],
+            },
+        },
+        "requested_changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "requested_of": {"type": "string"},
+                    "change": {"type": "string"},
+                    "deadline": {
+                        "anyOf": [
+                            {"type": "null"},
+                            {"type": "string"},
+                        ]
+                    },
+                    "original_deadline_phrase": {
+                        "anyOf": [
+                            {"type": "null"},
+                            {"type": "string"},
+                        ]
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
+                    "evidence": {"type": "string"},
+                    "source_chunk_id": {"type": "string"},
+                },
+                "required": [
+                    "requested_of",
+                    "change",
+                    "deadline",
+                    "original_deadline_phrase",
+                    "priority",
                     "confidence",
                     "evidence",
                     "source_chunk_id",
@@ -146,9 +195,19 @@ CHUNK_JSON_SCHEMA = {
         "unresolved_items",
         "people_mentioned",
         "tasks",
+        "requested_changes",
         "next_steps",
         "important_entities",
     ],
+}
+
+ACTION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tasks": CHUNK_JSON_SCHEMA["properties"]["tasks"],
+        "requested_changes": CHUNK_JSON_SCHEMA["properties"]["requested_changes"],
+    },
+    "required": ["tasks", "requested_changes"],
 }
 
 
@@ -254,6 +313,25 @@ def _canonical_text(value: str) -> str:
     return value.strip()
 
 
+def _canonical_evidence(value: str) -> str:
+    """Canonicalize a quote while ignoring an optional transcript speaker prefix."""
+    text = str(value or "").strip()
+    prefix, separator, remainder = text.partition(":")
+    if separator and len(prefix.split()) <= 4:
+        text = remainder.strip()
+    return _canonical_text(text)
+
+
+def _merge_richer_action(existing: dict, candidate: dict) -> None:
+    """Preserve stronger supported attributes when two records cite the same utterance."""
+    if not existing.get("deadline") and candidate.get("deadline"):
+        existing["deadline"] = candidate["deadline"]
+    rank = {"low": 0, "medium": 1, "high": 2}
+    for field in ("priority", "confidence"):
+        if rank.get(candidate.get(field), 0) > rank.get(existing.get(field), 0):
+            existing[field] = candidate[field]
+
+
 def _find_source_quote(
     quote: str,
     source: str,
@@ -292,9 +370,46 @@ def _find_source_quote(
     )
 
     if not match:
-        return None
+        # Local models sometimes preserve the right quote with one or two words
+        # normalized. Recover only strong token-level matches and always return
+        # the original transcript wording, never the model's paraphrase.
+        quote_words = _canonical_text(quote).split()
+        if len(quote_words) < 5:
+            return None
+        best_match: tuple[float, str] | None = None
+        for raw_line in source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            utterance = line.split(":", 1)[1].strip() if ":" in line else line
+            source_words = _canonical_text(utterance).split()
+            if not source_words:
+                continue
+            matcher = SequenceMatcher(None, quote_words, source_words, autojunk=False)
+            blocks = matcher.get_matching_blocks()
+            matched = sum(block.size for block in blocks)
+            longest = max((block.size for block in blocks), default=0)
+            coverage = matched / len(quote_words)
+            if coverage >= 0.78 and longest >= 4 and (not best_match or coverage > best_match[0]):
+                best_match = (coverage, utterance)
+        return best_match[1] if best_match else None
 
     return match.group(0)
+
+
+def _source_context_for_quote(quote: str, source: str, radius: int = 1) -> str:
+    """Return the source line and narrow adjacent context containing verified evidence."""
+    quote_key = _canonical_text(quote)
+    if not quote_key:
+        return ""
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        line_key = _canonical_text(line)
+        if quote_key in line_key or line_key.endswith(quote_key):
+            start = max(0, index - radius)
+            end = min(len(lines), index + radius + 1)
+            return "\n".join(lines[start:end])
+    return ""
 
 
 def _name_appears_in_source(
@@ -368,10 +483,16 @@ class LLMService:
         host: str,
         model: str,
         user_name: str,
+        user_aliases: list[str] | None = None,
+        num_ctx: int = 32_768,
     ):
         self.host = host.rstrip("/")
         self.model = model
         self.user_name = user_name
+        self.user_aliases = {
+            value.casefold() for value in [user_name, *(user_aliases or [])] if value.strip()
+        }
+        self.num_ctx = max(8_192, int(num_ctx))
 
         self.client = httpx.Client(
             timeout=httpx.Timeout(
@@ -477,6 +598,7 @@ class LLMService:
                     "think": False,
                     "options": {
                         "temperature": 0,
+                        "num_ctx": self.num_ctx,
                     },
                 },
             )
@@ -582,6 +704,7 @@ class LLMService:
         # -------------------------------------------------------------
 
         candidates: list[dict[str, Any]] = []
+        focused_actions: dict[str, list[dict]] = {"tasks": [], "requested_changes": []}
 
         for index, chunk in enumerate(chunks):
             chunk_id = f"chunk_{index + 1:03d}"
@@ -606,10 +729,48 @@ class LLMService:
                 meeting_date=metadata["date"],
             )
 
+            if progress_callback:
+                progress_callback(
+                    70 + round(12 * index / max(1, len(chunks))),
+                    f"Auditing actions in transcript part {index + 1} of {len(chunks)}",
+                )
+
+            action_prompt = ACTION_AUDIT_PROMPT.format(
+                transcript=chunk,
+                chunk_id=chunk_id,
+                user_name=self.user_name,
+            )
+            action_evidence = self._generate_json(
+                action_prompt,
+                schema=ACTION_JSON_SCHEMA,
+                meeting_date=metadata["date"],
+            )
+
+            for key in ("tasks", "requested_changes"):
+                values = action_evidence.get(key, [])
+                if isinstance(values, list):
+                    focused_actions[key].extend(
+                        item for item in values
+                        if isinstance(item, dict)
+                        and _categorical_level(item.get("confidence"), "low") in {"high", "medium"}
+                    )
+
+            for key in ("tasks", "requested_changes"):
+                general_values = extracted.get(key, [])
+                focused_values = action_evidence.get(key, [])
+                if not isinstance(general_values, list):
+                    general_values = []
+                if not isinstance(focused_values, list):
+                    focused_values = []
+                extracted[key] = [*general_values, *focused_values]
+
             # Never trust a model-generated chunk ID.
             for task in extracted.get("tasks", []):
                 if isinstance(task, dict):
                     task["source_chunk_id"] = chunk_id
+            for change in extracted.get("requested_changes", []):
+                if isinstance(change, dict):
+                    change["source_chunk_id"] = chunk_id
 
             candidates.append(
                 {
@@ -658,6 +819,7 @@ class LLMService:
                 ensure_ascii=False,
             ),
             meeting_date=metadata["date"],
+            user_name=self.user_name,
         )
 
         last_error: Exception | None = None
@@ -669,6 +831,16 @@ class LLMService:
                     schema=schema,
                     meeting_date=metadata["date"],
                 )
+
+                # The final editorial pass may shorten a report too aggressively.
+                # Reintroduce medium/high-confidence candidates from the dedicated
+                # action audit, then let the deterministic evidence and owner checks
+                # reject unsupported records and remove duplicates.
+                for key in ("tasks", "requested_changes"):
+                    final_values = generated.get(key, [])
+                    if not isinstance(final_values, list):
+                        final_values = []
+                    generated[key] = [*final_values, *focused_actions[key]]
 
                 sanitized = self._sanitize(
                     generated,
@@ -746,6 +918,11 @@ class LLMService:
                     meeting_day,
                 )
 
+        for change in analysis.requested_changes:
+            deadline = getattr(change, "deadline", None)
+            if deadline and deadline.original and not deadline.normalized:
+                deadline.normalized = normalize_deadline(deadline.original, meeting_day)
+
         return analysis
 
     # -----------------------------------------------------------------
@@ -820,6 +997,10 @@ class LLMService:
                 task.get("task") or task.get("action") or ""
             ).strip()
 
+            action = str(task.get("action") or "").strip()
+            if action and task_text and not _canonical_text(task_text).startswith(_canonical_text(action)):
+                task_text = f"{action} {task_text}"
+
             evidence = str(
                 task.get("evidence") or ""
             ).strip()
@@ -847,19 +1028,20 @@ class LLMService:
 
             owner_key = owner.casefold()
 
-            allowed_special_owners = {
-                self.user_name.casefold(),
-                "unknown_participant",
-            }
+            if owner_key in self.user_aliases:
+                owner = self.user_name
+                owner_key = owner.casefold()
+                task["owner"] = owner
 
-            if (
-                owner_key not in allowed_special_owners
-                and not _name_appears_in_source(
-                    owner,
-                    transcript,
-                )
+            owner_context = _source_context_for_quote(source_evidence, transcript)
+            if owner_key == self.user_name.casefold():
+                if not any(_name_appears_in_source(alias, owner_context) for alias in self.user_aliases):
+                    continue
+            elif owner_key not in {"unknown_participant", "team"} and not _name_appears_in_source(
+                owner, owner_context
             ):
-                # Named owner doesn't exist anywhere in the source.
+                # A named owner must be supported by the task evidence or its
+                # immediately adjacent conversational context.
                 continue
 
             # ---------------------------------------------------------
@@ -887,6 +1069,13 @@ class LLMService:
             task["confidence"] = _categorical_level(task.get("confidence"), "low")
             task["priority"] = _categorical_level(task.get("priority"), "medium")
 
+            duplicate_by_evidence = next((existing for existing in valid_tasks
+                if _canonical_text(existing.get("owner", "")) == _canonical_text(owner)
+                and _canonical_evidence(existing.get("evidence", "")) == _canonical_evidence(source_evidence)), None)
+            if duplicate_by_evidence:
+                _merge_richer_action(duplicate_by_evidence, task)
+                continue
+
             # ---------------------------------------------------------
             # Deterministic deduplication
             # ---------------------------------------------------------
@@ -911,6 +1100,84 @@ class LLMService:
             valid_tasks.append(task)
 
         raw["tasks"] = valid_tasks
+
+        # -------------------------------------------------------------
+        # Validate requested changes independently from accepted tasks
+        # -------------------------------------------------------------
+
+        valid_changes: list[dict] = []
+        seen_changes: set[tuple] = set()
+        change_values = raw.get("requested_changes", [])
+        if not isinstance(change_values, list):
+            change_values = []
+
+        for change in change_values:
+            if not isinstance(change, dict):
+                continue
+
+            requested_of = str(change.get("requested_of") or "unknown_participant").strip()
+            change_text = str(change.get("change") or change.get("task") or change.get("action") or "").strip()
+            evidence = str(change.get("evidence") or "").strip()
+            if not requested_of or not change_text or not evidence:
+                continue
+
+            source_evidence = _find_source_quote(evidence, transcript)
+            if not source_evidence:
+                continue
+
+            recipient_key = requested_of.casefold()
+            if recipient_key in self.user_aliases:
+                requested_of = self.user_name
+                recipient_key = requested_of.casefold()
+
+            recipient_context = _source_context_for_quote(source_evidence, transcript)
+            if recipient_key == self.user_name.casefold():
+                if not any(_name_appears_in_source(alias, recipient_context) for alias in self.user_aliases):
+                    continue
+            elif recipient_key not in {"unknown_participant", "team", "all_participants"} and not _name_appears_in_source(
+                requested_of, recipient_context
+            ):
+                continue
+
+            deadline = change.get("deadline")
+            normalized_deadline = None
+            if isinstance(deadline, dict):
+                original = str(deadline.get("original") or change.get("original_deadline_phrase") or "").strip()
+                normalized_deadline = deadline.get("normalized")
+            else:
+                original = str(deadline or change.get("original_deadline_phrase") or "").strip()
+            if original:
+                source_deadline = _find_source_quote(original, transcript)
+                change["deadline"] = ({"original": source_deadline, "normalized": normalized_deadline}
+                                      if source_deadline else None)
+            else:
+                change["deadline"] = None
+
+            change["requested_of"] = requested_of
+            change["change"] = change_text
+            change["evidence"] = source_evidence
+            change["confidence"] = _categorical_level(change.get("confidence"), "low")
+            change["priority"] = _categorical_level(change.get("priority"), "medium")
+
+            duplicate_by_evidence = next((existing for existing in valid_changes
+                if _canonical_text(existing.get("requested_of", "")) == _canonical_text(requested_of)
+                and _canonical_evidence(existing.get("evidence", "")) == _canonical_evidence(source_evidence)), None)
+            if duplicate_by_evidence:
+                _merge_richer_action(duplicate_by_evidence, change)
+                continue
+
+            deadline_key = ""
+            if isinstance(change.get("deadline"), dict):
+                deadline_key = _canonical_text(change["deadline"].get("original", ""))
+            dedupe_key = (
+                _canonical_text(requested_of), _canonical_text(change_text), deadline_key
+            )
+            if dedupe_key in seen_changes:
+                continue
+            seen_changes.add(dedupe_key)
+            valid_changes.append(change)
+
+        raw["requested_changes"] = valid_changes
 
         # -------------------------------------------------------------
         # Validate people mentioned

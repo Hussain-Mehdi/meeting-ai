@@ -39,6 +39,15 @@ class Task(BaseModel):
     evidence: str = Field(min_length=1)
 
 
+class RequestedChange(BaseModel):
+    requested_of: str
+    change: str
+    deadline: Optional[Deadline] = None
+    priority: Priority = "medium"
+    confidence: Confidence
+    evidence: str = Field(min_length=1)
+
+
 class MeetingAnalysis(BaseModel):
     meeting: MeetingMetadata
     summary: str
@@ -48,4 +57,5 @@ class MeetingAnalysis(BaseModel):
     attendees: list[Attendee] = Field(default_factory=list)
     people_mentioned: list[PersonMention] = Field(default_factory=list)
     tasks: list[Task] = Field(default_factory=list)
+    requested_changes: list[RequestedChange] = Field(default_factory=list)
     next_steps: list[str] = Field(default_factory=list)

@@ -25,7 +25,10 @@ class MeetingService:
             initial_prompt=settings.whisper_initial_prompt,
             user_name=settings.user_name,
         )
-        self.llm = LLMService(settings.ollama_host, settings.ollama_model, settings.user_name)
+        self.llm = LLMService(
+            settings.ollama_host, settings.ollama_model, settings.user_name, settings.aliases,
+            settings.ollama_num_ctx,
+        )
         self.started_at = None
 
     def start(self, title="Untitled meeting", meet_url=None):

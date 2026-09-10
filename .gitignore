@@ -8,4 +8,5 @@ data/meetings.db*
 data/meetings/*
 !data/meetings/.gitkeep
 logs/*.log
-
+tmp/
+output/pdf/
