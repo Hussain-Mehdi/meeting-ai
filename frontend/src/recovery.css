@@ -24,3 +24,18 @@
 .recovery p { margin: 5px 0 0; color: #6f716b; font-size: 12px; }
 .recovery-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .recovery .retry-error { color: #9f3e37; }
+
+.danger { border: 1px solid #b53838; background: #b53838; color: white; border-radius: 7px; padding: 8px 12px; font: inherit; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 7px; }
+.danger:hover { background: #9c2f2f; }
+.danger:disabled { cursor: wait; opacity: .55; }
+.delete-trigger { color: #b53838; }
+.delete-confirm { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; background: #fff3f1; border: 1px solid #f0d2ce; border-radius: 8px; padding: 14px 16px; margin: 14px 0 6px; font-size: 13px; }
+.delete-confirm p { margin: 5px 0 0; color: #7a4a46; max-width: 560px; line-height: 1.5; }
+.meeting-row-wrap { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px; }
+.meeting-row-wrap > .meeting-row { min-width: 0; }
+.meeting-row-wrap > .download-error { grid-column: 1 / -1; text-align: left; margin: 0 0 6px; }
+.row-delete { border: 0; background: transparent; color: #9a9c95; padding: 8px; border-radius: 6px; cursor: pointer; display: flex; }
+.row-delete:hover { color: #b53838; background: #fff3f1; }
+.row-delete:disabled { opacity: .35; cursor: not-allowed; }
+.row-confirm { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #7a4a46; white-space: nowrap; }
+.row-confirm .danger, .row-confirm .secondary { padding: 5px 9px; font-size: 12px; }

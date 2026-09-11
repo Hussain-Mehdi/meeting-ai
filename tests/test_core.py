@@ -592,3 +592,75 @@ def test_processing_waits_until_active_recording_stops(monkeypatch, tmp_path):
         await service._queue.join()
     asyncio.run(scenario())
     assert started == [False]
+
+
+def _service_for_delete(monkeypatch, tmp_path):
+    import backend.meetings.service as meeting_service_module
+    db = Database(tmp_path / "test.db")
+    recordings = tmp_path / "meetings"; recordings.mkdir()
+    service = MeetingService.__new__(MeetingService); service.db = db
+    service._queue = service._worker = None; service._pending = []
+    service.settings = type("S", (), {"recordings_path": recordings, "defer_processing_while_recording": True})()
+    machine = StateMachine(); monkeypatch.setattr(meeting_service_module, "runtime", machine)
+    return db, service, machine, recordings
+
+
+def test_delete_meeting_removes_rows_and_files(monkeypatch, tmp_path):
+    db, service, machine, recordings = _service_for_delete(monkeypatch, tmp_path)
+    folder = recordings / "done"; folder.mkdir()
+    for name in ("recording.wav", "recording-system.wav", "transcript.json", "analysis.json"):
+        (folder / name).write_bytes(b"data")
+    db.create_meeting("done", "Finished", "2026-08-10T10:00:00+05:00", folder / "recording.wav")
+    db.finish_recording("done", "2026-08-10T10:10:00+05:00", 600)
+    db.save_transcript("done", [{"start": 0, "end": 1, "speaker": "Hussain", "text": "hello"}], folder / "transcript.json")
+    db.save_analysis("done", _analysis(), folder / "analysis.json")
+    assert db.tasks()
+
+    result = service.delete_meeting("done")
+    assert result == {"deleted": "done", "files_removed": True}
+    assert db.get_meeting("done") is None
+    assert not folder.exists() and recordings.exists()
+    assert db.tasks() == [] and db.transcript("done") == []
+    with db.connection() as conn:
+        for table in ("people", "requested_changes", "decisions", "goals", "key_topics", "next_steps", "meeting_info_edits"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE meeting_id='done'").fetchone()[0] == 0
+
+
+def test_delete_refuses_active_recording_processing_and_queued(monkeypatch, tmp_path):
+    import pytest
+    db, service, machine, recordings = _service_for_delete(monkeypatch, tmp_path)
+    for meeting_id in ("live", "busy", "waiting"):
+        folder = recordings / meeting_id; folder.mkdir(); (folder / "recording.wav").write_bytes(b"data")
+        db.create_meeting(meeting_id, meeting_id, "2026-08-10T10:00:00+05:00", folder / "recording.wav")
+    machine.transition(MeetingState.RECORDING, recording=True, meeting_id="live")
+    machine.processing_transition(MeetingState.RECORDED, meeting_id="busy"); machine.processing_transition(MeetingState.TRANSCRIBING)
+    service._pending = ["waiting"]
+    for meeting_id in ("live", "busy", "waiting"):
+        with pytest.raises(ValueError): service.delete_meeting(meeting_id)
+        assert db.get_meeting(meeting_id) and (recordings / meeting_id / "recording.wav").exists()
+    with pytest.raises(KeyError): service.delete_meeting("missing")
+
+
+def test_delete_never_touches_folders_outside_recordings_root(monkeypatch, tmp_path):
+    db, service, machine, recordings = _service_for_delete(monkeypatch, tmp_path)
+    outside = tmp_path / "elsewhere"; outside.mkdir(); (outside / "recording.wav").write_bytes(b"keep")
+    db.create_meeting("ext", "External", "2026-08-10T10:00:00+05:00", outside / "recording.wav")
+    assert service.delete_meeting("ext") == {"deleted": "ext", "files_removed": False}
+    assert (outside / "recording.wav").exists() and db.get_meeting("ext") is None
+
+
+def test_delete_endpoint_maps_errors(tmp_path):
+    from fastapi import FastAPI
+    from backend.api.routes import create_router
+
+    class FakeService:
+        def delete_meeting(self, meeting_id):
+            if meeting_id == "missing": raise KeyError("Meeting not found.")
+            if meeting_id == "busy": raise ValueError("This meeting is being processed.")
+            return {"deleted": meeting_id, "files_removed": True}
+
+    app = FastAPI(); app.include_router(create_router(Database(tmp_path / "test.db"), FakeService()))
+    client = TestClient(app)
+    assert client.delete("/api/meetings/ok").json() == {"deleted": "ok", "files_removed": True}
+    assert client.delete("/api/meetings/missing").status_code == 404
+    assert client.delete("/api/meetings/busy").status_code == 409

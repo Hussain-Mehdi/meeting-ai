@@ -516,6 +516,7 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/transcript` | Transcript segments |
 | `GET` | `/meetings/{id}/analysis` | Analysis JSON |
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after completion |
+| `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its recordings, transcript, and report (refused while recording, processing, or queued) |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Personal tasks |
 | `PATCH` | `/tasks/{id}` | Update task status |

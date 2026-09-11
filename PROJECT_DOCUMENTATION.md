@@ -637,6 +637,7 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/transcript` | Timestamped transcript segments |
 | `GET` | `/meetings/{id}/analysis` | Current `analysis.json` |
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after analysis completes |
+| `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its folder under `RECORDINGS_PATH`, and every derived row (refused while recording, processing, or queued) |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Tasks owned by configured user aliases |
 | `PATCH` | `/tasks/{id}` | Change status to `open` or `completed` |

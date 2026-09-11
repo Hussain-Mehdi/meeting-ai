@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +141,29 @@ class MeetingService:
                 log.info("resuming interrupted meeting=%s from saved %s", meeting_id, source)
             except ValueError as exc:
                 log.warning("could not resume interrupted meeting=%s: %s", meeting_id, exc)
+
+    def delete_meeting(self, meeting_id: str) -> dict:
+        """Permanently remove a meeting's database rows and its folder of recordings, transcript, and analysis."""
+        meeting = self.db.get_meeting(meeting_id)
+        if not meeting: raise KeyError("Meeting not found.")
+        status = runtime.snapshot()
+        if status["recording"] and status["meeting_id"] == meeting_id:
+            raise ValueError("This meeting is being recorded. Stop the recording before deleting it.")
+        if status["processing"]["meeting_id"] == meeting_id and status["processing"]["state"] in ("recorded", "transcribing", "analyzing"):
+            raise ValueError("This meeting is being processed. Wait for processing to finish before deleting it.")
+        if meeting_id in self._pending:
+            raise ValueError("This meeting is queued for processing. Wait for it to finish before deleting it.")
+        folder = Path(meeting["audio_path"]).parent if meeting.get("audio_path") else None
+        removed_files = False
+        recordings_root = self.settings.recordings_path.resolve()
+        if folder and folder.exists() and folder.resolve().parent == recordings_root:
+            shutil.rmtree(folder, ignore_errors=False)
+            removed_files = True
+        self.db.delete_meeting(meeting_id)
+        if status["processing"]["meeting_id"] == meeting_id:
+            runtime.processing_transition(MeetingState.IDLE, meeting_id=None, progress=0, stage_detail="Nothing to process", error=None)
+        log.info("meeting deleted meeting=%s files_removed=%s", meeting_id, removed_files)
+        return {"deleted": meeting_id, "files_removed": removed_files}
 
     @staticmethod
     def _recording_candidates(audio: Path) -> list[Path]:

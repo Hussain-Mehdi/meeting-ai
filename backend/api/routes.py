@@ -131,6 +131,18 @@ def create_router(db, service):
         except ValueError as exc:
             raise HTTPException(409, str(exc))
 
+    @router.delete("/meetings/{meeting_id}")
+    def delete_meeting(meeting_id: str):
+        try:
+            return service.delete_meeting(meeting_id)
+        except KeyError:
+            raise HTTPException(404, "Meeting not found")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        except OSError as exc:
+            log.exception("meeting files could not be removed meeting_id=%s", meeting_id)
+            raise HTTPException(500, f"The meeting files could not be removed: {exc}")
+
     @router.get("/tasks")
     def tasks(): return db.tasks()
 

@@ -140,6 +140,17 @@ class Database:
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             db.execute("UPDATE meetings SET summary='', analysis_path=NULL WHERE id=?", (meeting_id,))
 
+    def delete_meeting(self, meeting_id: str) -> bool:
+        """Remove a meeting and every derived row. Connections do not enable foreign keys, so delete explicitly."""
+        with self.connection() as db:
+            if not db.execute("SELECT 1 FROM meetings WHERE id=?", (meeting_id,)).fetchone():
+                return False
+            for table in ("transcript_segments", "people", "tasks", "requested_changes", "decisions", "goals",
+                          "key_topics", "next_steps", "meeting_info_edits"):
+                db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
+            db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
+        return True
+
     def list_meetings(self, query=None):
         with self.connection() as db:
             if query:
