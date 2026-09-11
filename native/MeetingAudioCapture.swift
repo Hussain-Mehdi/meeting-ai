@@ -58,7 +58,14 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        // Flush what was captured so far and exit, so the backend notices the dead
+        // stream instead of showing "Recording" while the files stop growing.
         fputs("Capture stopped: \(error.localizedDescription)\n", stderr)
+        Task {
+            await systemWriter.finish()
+            await microphoneWriter.finish()
+            exit(3)
+        }
     }
 }
 

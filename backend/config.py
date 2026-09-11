@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     database_path: Path = Path("data/meetings.db")
     recordings_path: Path = Path("data/meetings")
     detection_interval: float = 3.0
+    detection_timeout: float = 15.0
+    # Consecutive "no Meet tab" readings required before a recording is auto-stopped.
+    detection_end_confirmations: int = 5
     max_recording_hours: float = 4.0
+    resume_interrupted_processing: bool = True
+    # Whisper/Ollama never start while a recording is being captured, so the
+    # capture (the source of truth for the transcript) always gets full priority.
+    defer_processing_while_recording: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

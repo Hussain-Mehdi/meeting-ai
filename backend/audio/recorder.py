@@ -2,8 +2,9 @@ import argparse
 import re
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from .devices import AudioDeviceManager
 
 
@@ -19,6 +20,28 @@ class AudioRecorder:
         self.source_paths = []
         self.capture_backend = "unknown"
         self._lock = Lock()
+        self._stderr_lines = deque(maxlen=50)
+
+    def _drain_stderr(self, process) -> None:
+        """Keep the helper's stderr pipe empty so it can never block on a full buffer."""
+        def pump():
+            try:
+                for raw in iter(process.stderr.readline, b""):
+                    line = raw.decode(errors="replace").rstrip()
+                    if line: self._stderr_lines.append(line)
+            except Exception: pass
+        Thread(target=pump, name="audio-capture-stderr", daemon=True).start()
+
+    def _recent_stderr(self) -> str:
+        return " | ".join(self._stderr_lines).strip()
+
+    def health(self) -> str | None:
+        """Return a description of the failure if the capture process died, else None."""
+        if not self.process or self.started_monotonic is None: return None
+        code = self.process.poll()
+        if code is None: return None
+        detail = self._recent_stderr() or f"exit code {code}"
+        return f"Audio capture process stopped unexpectedly ({detail})."
 
     def start(self, path: Path) -> None:
         with self._lock:
@@ -28,16 +51,19 @@ class AudioRecorder:
             system_path = path.parent / "recording-system.wav"
             microphone_path = path.parent / "recording-microphone.wav"
             self.source_paths = [system_path]
+            self._stderr_lines.clear()
             native_helper = Path("bin/meeting-audio-capture")
             if native_helper.exists() and native_helper.is_file():
                 self.source_paths = [system_path, microphone_path]
                 self.capture_backend = "ScreenCaptureKit"
                 self.process = subprocess.Popen([str(native_helper), str(system_path), str(microphone_path)],
-                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._drain_stderr(self.process)
                 time.sleep(1.0)
                 if self.process.poll() is not None:
-                    error = self.process.stderr.read().decode(errors="replace")
-                    raise RecordingError(f"Native macOS audio capture could not start: {error.strip()} Grant Screen & System Audio Recording and Microphone permissions, then restart Meeting AI.")
+                    time.sleep(0.2)
+                    error = self._recent_stderr()
+                    raise RecordingError(f"Native macOS audio capture could not start: {error} Grant Screen & System Audio Recording and Microphone permissions, then restart Meeting AI.")
                 self.started_monotonic = time.monotonic()
                 return
             self.capture_backend = "BlackHole fallback"
@@ -57,10 +83,11 @@ class AudioRecorder:
                 command += ["-map", "0:a", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-y", str(system_path)]
             self.process = subprocess.Popen(command,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self._drain_stderr(self.process)
             time.sleep(.5)
             if self.process.poll() is not None:
-                error = self.process.stderr.read().decode(errors="replace")
-                raise RecordingError(f"Unable to start recording: {error.strip()}")
+                time.sleep(0.2)
+                raise RecordingError(f"Unable to start recording: {self._recent_stderr()}")
             self.started_monotonic = time.monotonic()
 
     def stop(self) -> dict:

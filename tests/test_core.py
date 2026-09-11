@@ -21,9 +21,52 @@ def test_deadlines():
 
 
 def test_state_machine():
-    state = StateMachine(); state.transition(MeetingState.RECORDING); state.transition(MeetingState.RECORDED)
-    state.transition(MeetingState.TRANSCRIBING); state.transition(MeetingState.ANALYZING); state.transition(MeetingState.COMPLETED)
-    assert state.snapshot()["state"] == "completed"
+    state = StateMachine(); state.transition(MeetingState.RECORDING); state.transition(MeetingState.IDLE)
+    state.processing_transition(MeetingState.RECORDED); state.processing_transition(MeetingState.TRANSCRIBING)
+    state.processing_transition(MeetingState.ANALYZING); state.processing_transition(MeetingState.COMPLETED)
+    assert state.snapshot()["state"] == "idle"
+    assert state.snapshot()["processing"]["state"] == "completed"
+
+
+def test_recording_can_start_while_processing_runs():
+    import pytest
+    state = StateMachine()
+    state.processing_transition(MeetingState.RECORDED); state.processing_transition(MeetingState.TRANSCRIBING)
+    state.transition(MeetingState.RECORDING, recording=True)
+    assert state.processing_busy() and state.snapshot()["recording"]
+    with pytest.raises(ValueError): state.processing_transition(MeetingState.COMPLETED)
+    state.transition(MeetingState.IDLE, recording=False)
+    state.processing_transition(MeetingState.ANALYZING); state.processing_transition(MeetingState.COMPLETED)
+
+
+def test_second_meeting_queues_behind_active_processing(monkeypatch, tmp_path):
+    import backend.meetings.service as meeting_service_module
+    db = Database(tmp_path / "test.db")
+    for meeting_id in ("a", "b"):
+        audio = tmp_path / meeting_id / "recording.wav"; audio.parent.mkdir(); audio.write_bytes(b"audio")
+        db.create_meeting(meeting_id, meeting_id, "2026-08-10T10:00:00+05:00", audio)
+    service = MeetingService.__new__(MeetingService); service.db = db
+    service._queue = service._worker = None; service._pending = []
+    service.settings = type("S", (), {"defer_processing_while_recording": True})()
+    machine = StateMachine(); monkeypatch.setattr(meeting_service_module, "runtime", machine)
+    processed = []
+
+    async def fake_process(meeting_id, prefer_saved_transcript=False):
+        processed.append(meeting_id)
+        machine.processing_transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id)
+        await asyncio.sleep(0)
+        machine.processing_transition(MeetingState.ANALYZING); machine.processing_transition(MeetingState.COMPLETED)
+    service.process = fake_process
+
+    async def scenario():
+        assert service.enqueue("a") == "started"
+        assert service.enqueue("b") == "queued"
+        assert machine.snapshot()["processing"]["queued"] == ["b"]
+        await service._queue.join()
+        return machine.snapshot()["processing"]
+    final = asyncio.run(scenario())
+    assert processed == ["a", "b"]
+    assert final["state"] == "completed" and final["meeting_id"] == "b" and final["queued"] == []
 
 
 def test_database_persists(tmp_path):
@@ -135,6 +178,7 @@ def test_retry_prefers_transcript_even_when_recording_is_missing(monkeypatch, tm
     transcript_path.write_text(json.dumps({"quality": {"score": 90}, "segments": segments}), encoding="utf-8")
     db.save_transcript("a", segments, transcript_path)
     service = MeetingService.__new__(MeetingService); service.db = db
+    service._queue = service._worker = None; service._pending = []
     monkeypatch.setattr(meeting_service_module, "runtime", StateMachine())
     scheduled = []
     def capture_task(coroutine):
@@ -444,3 +488,107 @@ def test_health(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "api.db"))
     from backend.main import app
     assert TestClient(app).get("/api/health").json()["status"] == "ok"
+
+
+def _run_monitor_with_readings(readings, end_confirmations):
+    """Drive MeetDetector.monitor through a scripted sequence of detect() results."""
+    from backend.detection.meet_detector import DetectionError, MeetDetector, MeetTab
+    detector = MeetDetector(end_confirmations=end_confirmations)
+    events = []
+    script = iter(readings)
+
+    class ScriptDone(Exception): pass
+
+    def fake_detect():
+        value = next(script, ScriptDone())
+        if isinstance(value, Exception): raise value
+        return MeetTab("Meet", value) if value else None
+
+    async def on_detected(tab): events.append(("detected", tab.url))
+    async def on_ended(tab): events.append(("ended", tab.url))
+
+    async def drive():
+        detector.detect = fake_detect
+        try: await detector.monitor(on_detected, on_ended, interval=0)
+        except ScriptDone: pass
+    asyncio.run(drive())
+    return events
+
+
+def test_detector_ignores_transient_misses_and_errors():
+    from backend.detection.meet_detector import DetectionError
+    url = "https://meet.google.com/abc-defg-hij"
+    readings = [url, None, DetectionError("timeout"), None, DetectionError("osascript failed"), url, None, None, url]
+    assert _run_monitor_with_readings(readings, end_confirmations=3) == [("detected", url)]
+
+
+def test_detector_ends_meeting_only_after_consecutive_confirmations():
+    url = "https://meet.google.com/abc-defg-hij"
+    readings = [url, None, None, None, None, url]
+    events = _run_monitor_with_readings(readings, end_confirmations=3)
+    assert events == [("detected", url), ("ended", url), ("detected", url)]
+
+
+def test_detector_parses_osascript_output(monkeypatch):
+    import subprocess
+    from backend.detection.meet_detector import DetectionError, MeetDetector
+    import pytest
+    detector = MeetDetector()
+    outputs = {}
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args, outputs["code"], outputs["out"], outputs.get("err", ""))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    outputs.update(code=0, out="MEET\thttps://meet.google.com/abc-defg-hij\tMeet – abc\n")
+    tab = detector.detect(); assert (tab.url, tab.title) == ("https://meet.google.com/abc-defg-hij", "Meet – abc")
+    outputs.update(code=0, out="MEET\thttps://meet.google.com/abc-defg-hij\t\n")
+    assert detector.detect().title == "Google Meet"  # empty title must not read as "no meeting"
+    outputs.update(code=0, out="NONE\n")
+    assert detector.detect() is None
+    outputs.update(code=1, out="", err="execution error: Google Chrome got an error")
+    with pytest.raises(DetectionError): detector.detect()
+    def timeout_run(*args, **kwargs): raise subprocess.TimeoutExpired("osascript", 15)
+    monkeypatch.setattr(subprocess, "run", timeout_run)
+    with pytest.raises(DetectionError): detector.detect()
+
+
+def test_recorder_health_reports_dead_capture_process(tmp_path):
+    import subprocess
+    recorder = AudioRecorder()
+    assert recorder.health() is None
+    recorder.process = subprocess.Popen(["sh", "-c", "echo 'Capture stopped: display went away' >&2; exit 3"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    recorder._drain_stderr(recorder.process)
+    recorder.started_monotonic = time.monotonic()
+    recorder.process.wait(timeout=5); time.sleep(0.2)
+    assert "display went away" in recorder.health()
+
+
+def test_processing_waits_until_active_recording_stops(monkeypatch, tmp_path):
+    import backend.meetings.service as meeting_service_module
+    db = Database(tmp_path / "test.db")
+    audio = tmp_path / "a" / "recording.wav"; audio.parent.mkdir(); audio.write_bytes(b"audio")
+    db.create_meeting("a", "a", "2026-08-10T10:00:00+05:00", audio)
+    service = MeetingService.__new__(MeetingService); service.db = db
+    service._queue = service._worker = None; service._pending = []
+    service.settings = type("S", (), {"defer_processing_while_recording": True})()
+    machine = StateMachine(); monkeypatch.setattr(meeting_service_module, "runtime", machine)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(meeting_service_module.asyncio, "sleep", lambda *_: real_sleep(0))
+    started = []
+
+    async def fake_process(meeting_id, prefer_saved_transcript=False):
+        started.append(machine.snapshot()["recording"])
+        machine.processing_transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id)
+        machine.processing_transition(MeetingState.ANALYZING); machine.processing_transition(MeetingState.COMPLETED)
+    service.process = fake_process
+
+    async def scenario():
+        machine.transition(MeetingState.RECORDING, recording=True, meeting_id="live")
+        service.enqueue("a")
+        for _ in range(20): await asyncio.sleep(0)
+        assert started == []  # still waiting while the recording runs
+        assert "Waiting for the current recording" in machine.snapshot()["processing"]["stage_detail"]
+        machine.transition(MeetingState.IDLE, recording=False, meeting_id=None)
+        await service._queue.join()
+    asyncio.run(scenario())
+    assert started == [False]

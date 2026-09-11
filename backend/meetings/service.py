@@ -30,37 +30,116 @@ class MeetingService:
             settings.ollama_num_ctx,
         )
         self.started_at = None
+        self._queue = None
+        self._worker = None
+        self._pending = []
 
     def start(self, title="Untitled meeting", meet_url=None):
         status = runtime.snapshot()
         if status["recording"]: raise ValueError("A recording is already in progress.")
-        if status["state"] in ("recorded", "transcribing", "analyzing"):
-            raise ValueError("Wait for the current meeting to finish processing before starting another recording.")
         meeting_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         folder = self.settings.recordings_path / meeting_id; audio = folder / "recording.wav"
         self.recorder.start(audio)
         self.started_at = datetime.now().astimezone()
         self.db.create_meeting(meeting_id, title, self.started_at.isoformat(), audio, meet_url)
-        runtime.transition(MeetingState.RECORDING, meeting_id=meeting_id, recording=True, meeting_detected=bool(meet_url), progress=0,
-                           stage_detail=f"Capturing system audio and microphone · {self.recorder.capture_backend}", processing_started_at=None, error=None)
+        runtime.transition(MeetingState.RECORDING, meeting_id=meeting_id, recording=True, meeting_detected=bool(meet_url),
+                           stage_detail=f"Capturing system audio and microphone · {self.recorder.capture_backend}", error=None)
         notify("Recording started", title); log.info("recording started meeting=%s", meeting_id)
         return self.db.get_meeting(meeting_id)
 
     def stop(self):
         status = runtime.snapshot(); meeting_id = status["meeting_id"]
-        if not meeting_id: raise ValueError("No recording is in progress.")
+        if not status["recording"] or not meeting_id: raise ValueError("No recording is in progress.")
         result = self.recorder.stop(); ended = datetime.now().astimezone()
         duration = int((ended - self.started_at).total_seconds()) if self.started_at else int(result["duration_seconds"])
         self.db.finish_recording(meeting_id, ended.isoformat(), duration)
-        runtime.transition(MeetingState.RECORDED, recording=False, progress=5, stage_detail="Recording saved")
+        runtime.transition(MeetingState.IDLE, meeting_id=None, recording=False, stage_detail="Recording saved")
         notify("Meeting ended", "Recording saved. Processing has started.")
         return {**result, "meeting_id": meeting_id}
 
     async def stop_and_process(self):
-        """Finalize ffmpeg off-loop, then schedule local processing on the active app loop."""
+        """Finalize capture off-loop, then queue local processing so a new recording can start immediately."""
         result = await asyncio.to_thread(self.stop)
-        asyncio.create_task(self.process(result["meeting_id"], prefer_saved_transcript=False))
+        self.enqueue(result["meeting_id"], prefer_saved_transcript=False)
         return result
+
+    # ----- background processing queue -----
+
+    def enqueue(self, meeting_id: str, prefer_saved_transcript: bool = False) -> str:
+        """Queue a meeting for processing. Returns 'started' or 'queued'."""
+        if self._queue is None:
+            self._queue = asyncio.Queue()
+        self._queue.put_nowait((meeting_id, prefer_saved_transcript))
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._process_queue())
+        if runtime.processing_busy():
+            self._pending.append(meeting_id)
+            runtime.processing_update(queued=list(self._pending))
+            log.info("processing queued meeting=%s position=%s", meeting_id, len(self._pending))
+            return "queued"
+        runtime.processing_transition(MeetingState.RECORDED, meeting_id=meeting_id, progress=5,
+                                      stage_detail="Recording saved", error=None, queued=[])
+        return "started"
+
+    async def _wait_for_recording_to_finish(self, meeting_id: str) -> None:
+        """Whisper and Ollama saturate the CPU. Never start them while audio is being captured,
+        so the recording, and therefore the transcript built from it, is never compromised."""
+        waited = False
+        while self.settings.defer_processing_while_recording and runtime.snapshot()["recording"]:
+            if not waited:
+                waited = True
+                log.info("processing deferred while recording is active meeting=%s", meeting_id)
+                runtime.processing_update(stage_detail="Waiting for the current recording to finish so audio capture keeps full priority")
+            await asyncio.sleep(2)
+
+    async def _process_queue(self):
+        while True:
+            meeting_id, prefer_saved_transcript = await self._queue.get()
+            if meeting_id in self._pending:
+                self._pending.remove(meeting_id)
+            runtime.processing_update(queued=list(self._pending))
+            try:
+                await self._wait_for_recording_to_finish(meeting_id)
+                await self.process(meeting_id, prefer_saved_transcript=prefer_saved_transcript)
+            except Exception:
+                log.exception("processing worker failed meeting=%s", meeting_id)
+            finally:
+                self._queue.task_done()
+
+    async def watchdog(self, interval: float = 2.0):
+        """Save a recording whose capture process died or that exceeded the maximum length."""
+        while True:
+            await asyncio.sleep(interval)
+            status = runtime.snapshot()
+            if not status["recording"]: continue
+            meeting_id = status["meeting_id"]
+            reason = self.recorder.health()
+            if not reason and self.started_at:
+                elapsed = (datetime.now().astimezone() - self.started_at).total_seconds()
+                if elapsed > self.settings.max_recording_hours * 3600:
+                    reason = f"Recording reached the {self.settings.max_recording_hours:g} hour limit and was saved automatically."
+            if not reason: continue
+            log.warning("watchdog stopping recording meeting=%s reason=%s", meeting_id, reason)
+            notify("Recording stopped", reason, True)
+            try:
+                await self.stop_and_process()
+            except Exception as exc:
+                # The capture died before anything usable reached disk. Leave the row
+                # retryable and make the reason visible instead of showing "Recording" forever.
+                log.exception("watchdog could not save recording meeting=%s", meeting_id)
+                message = f"{reason} {exc}"
+                try: self.db.set_status(meeting_id, "failed", message)
+                except Exception: log.exception("could not persist failed status meeting=%s", meeting_id)
+                runtime.transition(MeetingState.FAILED, meeting_id=None, recording=False, stage_detail="Recording stopped", error=message)
+
+    async def resume_interrupted(self, meeting_ids):
+        """Continue processing meetings that a restart cut off, from their last checkpoint."""
+        for meeting_id in meeting_ids:
+            try:
+                source = await self.retry(meeting_id)
+                log.info("resuming interrupted meeting=%s from saved %s", meeting_id, source)
+            except ValueError as exc:
+                log.warning("could not resume interrupted meeting=%s: %s", meeting_id, exc)
 
     @staticmethod
     def _recording_candidates(audio: Path) -> list[Path]:
@@ -162,12 +241,13 @@ class MeetingService:
             meeting = self.db.get_meeting(meeting_id)
             if not meeting: raise ValueError("Meeting not found.")
             audio = Path(meeting["audio_path"]); folder = audio.parent
-            runtime.transition(MeetingState.TRANSCRIBING, progress=12, stage_detail="Loading the local Whisper model",
-                               processing_started_at=datetime.now(timezone.utc).isoformat())
+            runtime.processing_transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id, progress=12, error=None,
+                                          stage_detail="Loading the local Whisper model",
+                                          processing_started_at=datetime.now(timezone.utc).isoformat())
             self.db.set_status(meeting_id, "transcribing")
             result = await asyncio.to_thread(self._load_saved_transcript, meeting) if prefer_saved_transcript else None
             if result:
-                runtime.update(progress=55, stage_detail=f"Saved transcript restored · {len(result['segments'])} segments")
+                runtime.processing_update(progress=55, stage_detail=f"Saved transcript restored · {len(result['segments'])} segments")
             else:
                 available_recordings = [path for path in self._recording_candidates(audio) if path.exists() and path.stat().st_size > 0]
                 if not available_recordings:
@@ -175,7 +255,7 @@ class MeetingService:
                 levels = await asyncio.to_thread(self.recorder.measure_audio, available_recordings[0])
                 if levels["has_audible_audio"] is False:
                     raise RuntimeError("The recording contains silence, so no transcript or summary was generated. Confirm the audio capture setup and make sure someone speaks during the test.")
-                runtime.update(progress=25, stage_detail="Transcribing speech locally")
+                runtime.processing_update(progress=25, stage_detail="Transcribing speech locally")
                 result = await asyncio.to_thread(self.transcriber.transcribe, audio)
                 transcript_path = folder / "transcript.json"
                 self.db.save_transcript(meeting_id, result["segments"], transcript_path)
@@ -185,19 +265,19 @@ class MeetingService:
             quality = result.get("quality", {})
             if quality.get("score", 100) < 45:
                 raise RuntimeError("Transcript quality was too low for reliable AI analysis. The transcript and recording were saved, but summarization was skipped to avoid misleading results.")
-            runtime.update(progress=55, stage_detail=f"Transcript saved · {len(result['segments'])} segments · quality {quality.get('score', 100)}%")
-            runtime.transition(MeetingState.ANALYZING, progress=65, stage_detail="Extracting evidence from the transcript")
+            runtime.processing_update(progress=55, stage_detail=f"Transcript saved · {len(result['segments'])} segments · quality {quality.get('score', 100)}%")
+            runtime.processing_transition(MeetingState.ANALYZING, progress=65, stage_detail="Extracting evidence from the transcript")
             self.db.set_status(meeting_id, "analyzing")
             started = datetime.fromisoformat(meeting["started_at"])
             ended = datetime.fromisoformat(meeting["ended_at"] or meeting["started_at"])
             metadata = {"title": meeting["title"], "date": started.date().isoformat(), "start_time": started.isoformat(),
                 "end_time": ended.isoformat(), "duration_minutes": max(1, round(meeting["duration_seconds"] / 60))}
-            def analysis_progress(value, detail): runtime.update(progress=value, stage_detail=detail)
+            def analysis_progress(value, detail): runtime.processing_update(progress=value, stage_detail=detail)
             analysis = await asyncio.to_thread(self.llm.analyze, text, metadata, analysis_progress)
-            runtime.update(progress=94, stage_detail="Validating and saving the meeting record")
+            runtime.processing_update(progress=94, stage_detail="Validating and saving the meeting record")
             analysis_path = self._save_analysis_artifacts(folder, analysis)
             self.db.save_analysis(meeting_id, analysis, analysis_path)
-            runtime.transition(MeetingState.COMPLETED, progress=100, stage_detail="Meeting ready")
+            runtime.processing_transition(MeetingState.COMPLETED, progress=100, stage_detail="Meeting ready")
             notify("Meeting ready", f"{analysis.meeting.title} has been processed. {len(analysis.tasks)} tasks found.", True)
         except Exception as exc:
             log.exception("processing failed meeting=%s", meeting_id)
@@ -208,18 +288,17 @@ class MeetingService:
                 message = f"Processing failed, but any recording and transcript files already saved were not deleted. {exc}"
             try: self.db.set_status(meeting_id, "failed", message)
             except Exception: log.exception("could not persist failed status meeting=%s", meeting_id)
-            runtime.transition(MeetingState.FAILED, recording=False, stage_detail="Processing stopped safely",
-                               error=message)
+            runtime.processing_transition(MeetingState.FAILED, stage_detail="Processing stopped safely", error=message)
             notify("Processing failed", "Your saved recording or transcript can be retried in Meeting AI.", True)
 
     async def retry(self, meeting_id, retranscribe=False):
         meeting = self.db.get_meeting(meeting_id)
         if not meeting: raise ValueError("Meeting not found.")
         current = runtime.snapshot()
-        if current["state"] in ("recording", "recorded", "transcribing", "analyzing"):
-            raise ValueError("Another recording or meeting process is already running.")
-        if current["state"] in ("detected", "waiting_for_confirmation"):
-            runtime.transition(MeetingState.IDLE, meeting_detected=False, detected_title=None, detected_url=None)
+        if meeting_id == current["processing"]["meeting_id"] and current["processing"]["state"] in ("recorded", "transcribing", "analyzing"):
+            raise ValueError("This meeting is already being processed.")
+        if meeting_id in self._pending:
+            raise ValueError("This meeting is already queued for processing.")
         saved_transcript = await asyncio.to_thread(self._load_saved_transcript, meeting)
         audio = Path(meeting["audio_path"])
         recording_available = any(path.exists() and path.stat().st_size > 0 for path in self._recording_candidates(audio))
@@ -228,8 +307,8 @@ class MeetingService:
         if not retranscribe and not saved_transcript and not recording_available:
             raise ValueError("Neither the saved transcript nor the saved recording could be found.")
         source = "recording" if retranscribe or not saved_transcript else "transcript"
-        runtime.transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id, recording=False, progress=10,
-                           stage_detail=f"Retrying from saved {source}", processing_started_at=datetime.now(timezone.utc).isoformat(), error=None)
         self.db.set_status(meeting_id, "transcribing")
-        asyncio.create_task(self.process(meeting_id, prefer_saved_transcript=source == "transcript"))
+        outcome = self.enqueue(meeting_id, prefer_saved_transcript=source == "transcript")
+        if outcome == "started":
+            runtime.processing_update(stage_detail=f"Retrying from saved {source}")
         return source

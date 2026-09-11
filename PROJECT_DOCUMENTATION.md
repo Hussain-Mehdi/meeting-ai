@@ -215,7 +215,11 @@ Meeting AI reads `.env` through `pydantic-settings`. Unknown environment variabl
 | `DATABASE_PATH` | `data/meetings.db` | SQLite location |
 | `RECORDINGS_PATH` | `data/meetings` | Root for meeting folders |
 | `DETECTION_INTERVAL` | `3.0` | Seconds between Chrome detection checks |
-| `MAX_RECORDING_HOURS` | `4.0` | Declared maximum recording configuration; it is not currently enforced by the recorder |
+| `DETECTION_TIMEOUT` | `15.0` | Seconds to wait for Chrome to answer one detection check; a timeout is logged and ignored |
+| `DETECTION_END_CONFIRMATIONS` | `5` | Consecutive "no Meet tab" readings required before an active recording is auto-stopped |
+| `MAX_RECORDING_HOURS` | `4.0` | A recording longer than this is stopped and saved automatically by the watchdog |
+| `RESUME_INTERRUPTED_PROCESSING` | `true` | On startup, continue processing meetings whose transcription or analysis was cut off by a restart |
+| `DEFER_PROCESSING_WHILE_RECORDING` | `true` | Never start Whisper/Ollama while a recording is being captured; queued meetings wait until the recording stops |
 
 Recommended `.env`:
 
@@ -256,7 +260,9 @@ Detection only means a Meet page is open. It does not prove that a call is activ
 - detection creates a notification and moves the state to `waiting_for_confirmation`;
 - recording never starts automatically from detection;
 - the user must press **Start recording**;
-- closing or navigating away from the detected Meet tab stops an active recording;
+- closing or navigating away from the detected Meet tab stops an active recording, but only after `DETECTION_END_CONFIRMATIONS` consecutive checks (about 15 seconds by default) agree that the tab is gone;
+- a detection check that fails (Chrome busy, AppleScript error, timeout) is logged and never treated as the meeting ending;
+- a watchdog stops and saves the recording if the audio capture process dies or the `MAX_RECORDING_HOURS` limit is reached;
 - the manual **Stop recording** button remains the dependable fallback.
 
 ## 8. Audio capture
@@ -466,21 +472,9 @@ Actual processing time depends on Mac performance, transcript length, whether Wh
 
 ## 12. Runtime state machine
 
-States:
+Recording and processing are two independent machines inside one `StateMachine`, so a new meeting can be recorded while the previous one is still being transcribed or analyzed.
 
-```text
-idle
-detected
-waiting_for_confirmation
-recording
-recorded
-transcribing
-analyzing
-completed
-failed
-```
-
-Normal path:
+Recording lifecycle (`status.state`):
 
 ```mermaid
 stateDiagram-v2
@@ -488,17 +482,29 @@ stateDiagram-v2
     idle --> detected
     detected --> waiting_for_confirmation
     waiting_for_confirmation --> recording
-    recording --> recorded
+    idle --> recording: manual start
+    recording --> idle: stop (queues processing)
+    recording --> failed: capture died before data reached disk
+    failed --> idle
+```
+
+Processing pipeline (`status.processing.state`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> recorded: queued
     recorded --> transcribing
     transcribing --> analyzing
     analyzing --> completed
     recorded --> failed
     transcribing --> failed
     analyzing --> failed
+    completed --> recorded: next in queue
     failed --> transcribing: retry
 ```
 
-The state machine is protected by an `RLock`. Starting another recording is blocked while a meeting is recorded, transcribing, or analyzing.
+Processing runs on a single background worker so Whisper and Ollama never run twice at once, and the worker does not start a meeting while a recording is active: the capture is the source of truth for the transcript, so it always gets the machine to itself (the Whisper model is never downgraded to make room). Meetings that finish while another is processing wait in `status.processing.queued` and are shown as *Queued for processing*. Retrying a meeting joins the same queue. The machine is protected by an `RLock`.
 
 ## 13. Failure recovery
 

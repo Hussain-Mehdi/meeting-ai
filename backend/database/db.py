@@ -77,10 +77,16 @@ class Database:
         with self.connection() as db:
             db.execute("UPDATE meetings SET status=?,error=? WHERE id=?", (status, error, meeting_id))
 
+    def interrupted_processing_ids(self) -> list[str]:
+        """Meetings whose recording finished but whose processing was cut off by a restart."""
+        with self.connection() as db:
+            rows = db.execute("SELECT id FROM meetings WHERE status IN ('recorded','transcribing','analyzing') ORDER BY started_at").fetchall()
+        return [row["id"] for row in rows]
+
     def recover_interrupted_meetings(self) -> int:
         """Convert stale in-progress rows into explicit, retryable failures after an app restart."""
-        message = ("Meeting AI stopped before processing finished. Any recording or transcript already "
-                   "saved was not deleted. Open this meeting to retry from the latest safe checkpoint.")
+        message = ("Meeting AI was restarted before processing finished. The recording and any saved transcript "
+                   "were not deleted. Open this meeting to retry from the latest safe checkpoint.")
         with self.connection() as db:
             changed = db.execute("""UPDATE meetings
                 SET status='failed', error=?, ended_at=COALESCE(ended_at, started_at),
