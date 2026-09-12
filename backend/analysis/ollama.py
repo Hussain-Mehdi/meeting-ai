@@ -14,6 +14,7 @@ from backend.analysis.prompts import (
     FINAL_PROMPT,
 )
 from backend.analysis.schemas import MeetingAnalysis
+from backend.analysis.templates import get_template
 
 
 class LLMError(RuntimeError):
@@ -569,7 +570,9 @@ class LLMService:
     ) -> str:
         """
         Supports both the original system prompt and the refined prompt that
-        contains {meeting_date}.
+        contains {meeting_date}. Meeting-type guidance and the speaker-label
+        legend for the current meeting are appended; they never relax the
+        source-of-truth rules above them.
         """
 
         values = {
@@ -577,7 +580,38 @@ class LLMService:
             "meeting_date": meeting_date or "unknown",
         }
 
-        return SYSTEM_PROMPT.format(**values)
+        prompt = SYSTEM_PROMPT.format(**values)
+        context = getattr(self, "_meeting_context", None) or {}
+        template = get_template(context.get("template"))
+        prompt += (
+            "\n\n==================================================\n"
+            f"MEETING TYPE: {template.name.upper()}\n"
+            "==================================================\n\n"
+            f"{template.guidance}\n"
+        )
+        speakers = context.get("speakers") or {}
+        named = [name for name in speakers.get("named", []) if name]
+        unnamed = [name for name in speakers.get("unnamed", []) if name]
+        prompt += (
+            "\n==================================================\n"
+            "SPEAKER LABELS IN THIS TRANSCRIPT\n"
+            "==================================================\n\n"
+            f"- \"{self.user_name}\" is the user's own microphone.\n"
+        )
+        if unnamed:
+            prompt += (
+                f"- Unnamed voices: {', '.join(unnamed)}. These are distinct people detected by voice, "
+                "not names. Treat each exactly like \"Other participant\": never turn the label into a "
+                "person, never list it as an attendee, and assign its first-person commitments to "
+                "\"unknown_participant\" unless the person's real name is explicitly established in speech.\n"
+            )
+        if named:
+            prompt += (
+                f"- Confirmed people: {', '.join(named)}. The user has confirmed these speaker names from "
+                "their voices, so they ARE real attendees. A first-person commitment spoken under one of "
+                "these labels belongs to that person; a request addressed to one of them is a task for them.\n"
+            )
+        return prompt
 
     def _generate_json(
         self,
@@ -698,6 +732,13 @@ class LLMService:
             raise LLMError(
                 "Transcript contained no analyzable content."
             )
+
+        self._meeting_context = {
+            "template": metadata.get("template"),
+            "speakers": metadata.get("speakers") or {},
+        }
+        # Only schema fields are shown to the model as authoritative metadata.
+        metadata = {key: value for key, value in metadata.items() if key not in ("template", "speakers")}
 
         # -------------------------------------------------------------
         # Stage 1: evidence extraction

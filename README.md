@@ -517,6 +517,10 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/analysis` | Analysis JSON |
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after completion |
 | `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its recordings, transcript, and report (refused while recording, processing, or queued) |
+| `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct a transcript line |
+| `POST` | `/meetings/{id}/speakers` | Name a diarized voice, optionally remembering it for future meetings |
+| `GET` | `/meetings/{id}/audio` | Stream the saved recording for evidence playback |
+| `GET` | `/templates`, `/voices` | Meeting templates; remembered voices |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Personal tasks |
 | `PATCH` | `/tasks/{id}` | Update task status |

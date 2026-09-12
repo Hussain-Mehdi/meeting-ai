@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, meeting_id TEXT, valu
 CREATE TABLE IF NOT EXISTS goals (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS key_topics (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
 CREATE TABLE IF NOT EXISTS next_steps (id TEXT PRIMARY KEY, meeting_id TEXT, value TEXT);
+CREATE TABLE IF NOT EXISTS voice_profiles (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, embedding TEXT NOT NULL, samples INTEGER DEFAULT 1,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meeting_info_edits (
  meeting_id TEXT PRIMARY KEY, title TEXT NOT NULL, people_json TEXT NOT NULL,
  updated_at TEXT NOT NULL, FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
@@ -52,6 +56,22 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript(SCHEMA)
+            self._migrate(db)
+
+    @staticmethod
+    def _migrate(db) -> None:
+        """Add columns introduced after the first release without touching existing rows."""
+        def columns(table): return {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        additions = {
+            "transcript_segments": [("text_en", "TEXT"), ("avg_logprob", "REAL"), ("no_speech_prob", "REAL"),
+                                    ("speaker_id", "TEXT"), ("track", "TEXT"), ("edited", "INTEGER DEFAULT 0")],
+            "meetings": [("template", "TEXT DEFAULT 'engineering'"), ("platform", "TEXT")],
+        }
+        for table, fields in additions.items():
+            existing = columns(table)
+            for name, kind in fields:
+                if name not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     @contextmanager
     def connection(self):
@@ -63,10 +83,10 @@ class Database:
         finally:
             db.close()
 
-    def create_meeting(self, meeting_id, title, started_at, audio_path, meet_url=None):
+    def create_meeting(self, meeting_id, title, started_at, audio_path, meet_url=None, template="engineering", platform=None):
         with self.connection() as db:
-            db.execute("INSERT INTO meetings(id,title,meet_url,started_at,audio_path,status,created_at) VALUES(?,?,?,?,?,'recording',?)",
-                       (meeting_id, title, meet_url, started_at, str(audio_path), datetime.now(timezone.utc).isoformat()))
+            db.execute("INSERT INTO meetings(id,title,meet_url,started_at,audio_path,status,created_at,template,platform) VALUES(?,?,?,?,?,'recording',?,?,?)",
+                       (meeting_id, title, meet_url, started_at, str(audio_path), datetime.now(timezone.utc).isoformat(), template, platform))
 
     def finish_recording(self, meeting_id, ended_at, duration_seconds):
         with self.connection() as db:
@@ -97,9 +117,64 @@ class Database:
     def save_transcript(self, meeting_id, segments, transcript_path):
         with self.connection() as db:
             db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (meeting_id,))
-            db.executemany("INSERT INTO transcript_segments(meeting_id,start,end,speaker,text) VALUES(?,?,?,?,?)",
-                           [(meeting_id, s["start"], s["end"], s.get("speaker", "Speaker"), s["text"]) for s in segments])
+            db.executemany("""INSERT INTO transcript_segments(meeting_id,start,end,speaker,text,text_en,avg_logprob,no_speech_prob,speaker_id,track,edited)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                           [(meeting_id, s["start"], s["end"], s.get("speaker", "Speaker"), s["text"], s.get("text_en"),
+                             s.get("avg_logprob"), s.get("no_speech_prob"), s.get("speaker_id"), s.get("track"),
+                             1 if s.get("edited") else 0) for s in segments])
             db.execute("UPDATE meetings SET transcript_path=? WHERE id=?", (str(transcript_path), meeting_id))
+
+    def update_segment(self, meeting_id: str, segment_id: int, text: str | None = None, speaker: str | None = None) -> dict | None:
+        """Correct one transcript line. Only the fields supplied change; the row is marked as edited."""
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM transcript_segments WHERE id=? AND meeting_id=?", (segment_id, meeting_id)).fetchone()
+            if not row: return None
+            new_text = text.strip() if text is not None and text.strip() else row["text"]
+            new_speaker = speaker.strip() if speaker is not None and speaker.strip() else row["speaker"]
+            # The English rendering follows an edited original unless the original was already English.
+            new_text_en = row["text_en"]
+            if text is not None and text.strip() and text.strip() != row["text"]:
+                new_text_en = new_text if (row["text_en"] or "") == (row["text"] or "") else row["text_en"]
+            db.execute("UPDATE transcript_segments SET text=?, text_en=?, speaker=?, edited=1 WHERE id=?",
+                       (new_text, new_text_en, new_speaker, segment_id))
+            return dict(db.execute("SELECT * FROM transcript_segments WHERE id=?", (segment_id,)).fetchone())
+
+    def rename_speaker(self, meeting_id: str, old: str, new: str) -> int:
+        with self.connection() as db:
+            return db.execute("UPDATE transcript_segments SET speaker=?, edited=1 WHERE meeting_id=? AND speaker=?",
+                              (new.strip(), meeting_id, old)).rowcount
+
+    def rename_speaker_id(self, meeting_id: str, speaker_id: str, new: str) -> int:
+        with self.connection() as db:
+            return db.execute("UPDATE transcript_segments SET speaker=? WHERE meeting_id=? AND speaker_id=?",
+                              (new.strip(), meeting_id, speaker_id)).rowcount
+
+    # ----- voice profiles for one-time speaker naming -----
+
+    def voice_profiles(self) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM voice_profiles ORDER BY name").fetchall()
+        return [{**dict(r), "embedding": json.loads(r["embedding"])} for r in rows]
+
+    def upsert_voice_profile(self, name: str, embedding: list[float]) -> dict:
+        """Store or refine a named voice. Repeated namings average into the stored centroid."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM voice_profiles WHERE name=?", (name,)).fetchone()
+            if row:
+                previous = json.loads(row["embedding"]); n = int(row["samples"] or 1)
+                merged = [(p * n + e) / (n + 1) for p, e in zip(previous, embedding)]
+                db.execute("UPDATE voice_profiles SET embedding=?, samples=?, updated_at=? WHERE id=?",
+                           (json.dumps(merged), n + 1, now, row["id"]))
+                return {"id": row["id"], "name": name, "samples": n + 1}
+            profile_id = uuid.uuid4().hex[:12]
+            db.execute("INSERT INTO voice_profiles(id,name,embedding,samples,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                       (profile_id, name, json.dumps(embedding), 1, now, now))
+            return {"id": profile_id, "name": name, "samples": 1}
+
+    def delete_voice_profile(self, name: str) -> bool:
+        with self.connection() as db:
+            return db.execute("DELETE FROM voice_profiles WHERE name=?", (name,)).rowcount > 0
 
     def save_analysis(self, meeting_id: str, analysis: MeetingAnalysis, path: Path):
         with self.connection() as db:
@@ -182,7 +257,9 @@ class Database:
 
     def transcript(self, meeting_id):
         with self.connection() as db:
-            return [dict(x) for x in db.execute("SELECT start,end,speaker,text FROM transcript_segments WHERE meeting_id=? ORDER BY start", (meeting_id,))]
+            return [dict(x) for x in db.execute(
+                "SELECT id,start,end,speaker,text,text_en,avg_logprob,no_speech_prob,speaker_id,track,edited "
+                "FROM transcript_segments WHERE meeting_id=? ORDER BY start", (meeting_id,))]
 
     def tasks(self, owner=None):
         with self.connection() as db:

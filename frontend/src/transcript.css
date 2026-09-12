@@ -1,0 +1,30 @@
+.template-picker { border: 1px solid #d9d9d4; border-radius: 7px; background: white; padding: 8px 10px; font: inherit; font-size: 13px; color: #20211f; max-width: 200px; }
+.evidence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.play-evidence, .seek { border: 1px solid #deded9; background: white; color: #3d7448; border-radius: 10px; padding: 2px 8px; font: inherit; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.play-evidence:hover, .seek:hover { background: #edf5ee; }
+.seek { padding: 1px 6px; color: #6f716b; }
+.transcript-wrap { margin-top: 14px; }
+.speaker-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.speaker-chip { display: flex; align-items: center; gap: 7px; border: 1px solid #e3e3df; border-radius: 16px; padding: 5px 10px; font-size: 12px; background: #fafaf8; }
+.speaker-chip.unnamed { border-style: dashed; }
+.speaker-chip.named { background: #edf5ee; border-color: #cfe3d2; }
+.speaker-chip span { color: #8a8c85; }
+.link { border: 0; background: transparent; color: #3b5bdb; font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+.link:hover { text-decoration: underline; }
+.name-form { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.name-form input[type=text], .name-form input:not([type]) { border: 1px solid #d9d9d4; border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px; }
+.name-form .remember { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #6f716b; }
+.name-form .primary, .name-form .secondary { padding: 4px 8px; font-size: 12px; }
+.transcript div.low p { border-left: 2px solid #e2c36b; padding-left: 8px; }
+.transcript div.edited p { border-left: 2px solid #5c9a67; padding-left: 8px; }
+.transcript b.unnamed { color: #8a8c85; font-weight: 500; }
+.transcript p { position: relative; padding-right: 28px; }
+.transcript .translation { display: block; color: #6f716b; font-size: 12px; margin-top: 4px; }
+.transcript .flag { display: inline-block; margin-left: 8px; font-size: 10px; color: #9a7b1c; background: #fbf4dd; border-radius: 8px; padding: 1px 6px; vertical-align: middle; }
+.transcript .flag.edited-flag { color: #3d7448; background: #edf5ee; }
+.edit-line { position: absolute; right: 0; top: 0; border: 0; background: transparent; color: #b5b6b1; cursor: pointer; padding: 2px; opacity: 0; }
+.transcript div:hover .edit-line { opacity: 1; }
+.edit-line:hover { color: #20211f; }
+.segment-edit textarea { width: 100%; min-height: 70px; border: 1px solid #d9d9d4; border-radius: 7px; padding: 8px 10px; font: inherit; font-size: 13px; }
+.segment-edit .edit-actions { margin-top: 6px; }
+@media(max-width:600px){ .template-picker { max-width: 130px; } }

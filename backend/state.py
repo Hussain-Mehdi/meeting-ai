@@ -60,6 +60,7 @@ class RuntimeStatus:
     error: Optional[str] = None
     detected_title: Optional[str] = None
     detected_url: Optional[str] = None
+    detected_platform: Optional[str] = None
     processing: ProcessingStatus = field(default_factory=ProcessingStatus)
 
 

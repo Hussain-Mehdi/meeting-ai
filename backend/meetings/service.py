@@ -6,9 +6,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from backend.analysis.ollama import LLMService
+from backend.analysis.templates import get_template
 from backend.audio.recorder import AudioRecorder
 from backend.notifications.macos import notify
 from backend.state import MeetingState, runtime
+from backend.transcription.diarize import SpeakerDiarizer
 from backend.transcription.whisper import TranscriptionService
 
 
@@ -19,12 +21,19 @@ class MeetingService:
     def __init__(self, settings, db):
         self.settings, self.db = settings, db
         self.recorder = AudioRecorder()
+        self.diarizer = SpeakerDiarizer(db, threshold=settings.diarization_threshold,
+                                        match_threshold=settings.voice_match_threshold) if settings.diarization_enabled else None
         self.transcriber = TranscriptionService(
             settings.whisper_model,
             language=settings.whisper_language or None,
             task=settings.whisper_task,
             initial_prompt=settings.whisper_initial_prompt,
             user_name=settings.user_name,
+            backend=settings.whisper_backend,
+            translation=settings.whisper_translation,
+            mlx_repo=settings.whisper_mlx_repo or None,
+            offline=settings.whisper_offline,
+            diarizer=self.diarizer,
         )
         self.llm = LLMService(
             settings.ollama_host, settings.ollama_model, settings.user_name, settings.aliases,
@@ -35,14 +44,16 @@ class MeetingService:
         self._worker = None
         self._pending = []
 
-    def start(self, title="Untitled meeting", meet_url=None):
+    def start(self, title="Untitled meeting", meet_url=None, template=None, platform=None):
         status = runtime.snapshot()
         if status["recording"]: raise ValueError("A recording is already in progress.")
+        template_key = get_template(template).key
         meeting_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         folder = self.settings.recordings_path / meeting_id; audio = folder / "recording.wav"
         self.recorder.start(audio)
         self.started_at = datetime.now().astimezone()
-        self.db.create_meeting(meeting_id, title, self.started_at.isoformat(), audio, meet_url)
+        self.db.create_meeting(meeting_id, title, self.started_at.isoformat(), audio, meet_url,
+                               template=template_key, platform=platform or status.get("detected_platform"))
         runtime.transition(MeetingState.RECORDING, meeting_id=meeting_id, recording=True, meeting_detected=bool(meet_url),
                            stage_detail=f"Capturing system audio and microphone · {self.recorder.capture_backend}", error=None)
         notify("Recording started", title); log.info("recording started meeting=%s", meeting_id)
@@ -199,11 +210,76 @@ class MeetingService:
             "task": payload.get("task", "saved transcript"),
         }
 
+    def _speaker_context(self, segments: list[dict]) -> dict:
+        """Tell the analyst which labels are confirmed people and which are unnamed voices."""
+        labels = {str(segment.get("speaker") or "") for segment in segments}
+        labels.discard("")
+        unnamed = sorted(label for label in labels if label.startswith("Speaker ") or label in ("Other participant", "Speaker"))
+        named = sorted(label for label in labels if label not in unnamed and label != self.settings.user_name)
+        return {"user": self.settings.user_name, "named": named, "unnamed": unnamed}
+
+    def _transcript_payload(self, meeting: dict) -> tuple[Path, dict]:
+        audio = Path(meeting["audio_path"])
+        path = Path(meeting.get("transcript_path") or audio.parent / "transcript.json")
+        payload = {}
+        if path.exists():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(value, dict): payload = value
+            except (OSError, json.JSONDecodeError):
+                pass
+        return path, payload
+
+    def _rewrite_transcript_files(self, meeting: dict) -> None:
+        """Keep transcript.json/.txt in step with the corrected rows so retries use the corrections."""
+        path, payload = self._transcript_payload(meeting)
+        segments = self.db.transcript(meeting["id"])
+        payload["segments"] = segments
+        payload["edited"] = True
+        self._write_json_safely(path, json.dumps(payload, indent=2, ensure_ascii=False))
+        path.with_suffix(".txt").write_text("\n".join(f"{x['speaker']}: {x['text']}" for x in segments), encoding="utf-8")
+
+    def name_speaker(self, meeting_id: str, name: str, speaker_id: str | None = None, current_label: str | None = None,
+                     remember: bool = True) -> dict:
+        """Give a diarized voice a real name. With `remember`, the voice is recognised in future meetings."""
+        meeting = self.db.get_meeting(meeting_id)
+        if not meeting: raise KeyError("Meeting not found.")
+        name = name.strip()
+        if not name: raise ValueError("Name cannot be empty.")
+        if not speaker_id and not current_label: raise ValueError("Choose which speaker to name.")
+        changed = 0
+        if speaker_id:
+            changed = self.db.rename_speaker_id(meeting_id, speaker_id, name)
+        if not changed and current_label:
+            changed = self.db.rename_speaker(meeting_id, current_label, name)
+        if not changed: raise ValueError("No transcript lines belong to that speaker.")
+        path, payload = self._transcript_payload(meeting)
+        speakers = payload.get("speakers") or {}
+        profile = None
+        if speaker_id and speaker_id in speakers:
+            speakers[speaker_id]["label"] = name; speakers[speaker_id]["name"] = name
+            payload["speakers"] = speakers
+            if remember and self.diarizer is not None and speakers[speaker_id].get("centroid"):
+                profile = self.diarizer.remember(name, speakers[speaker_id]["centroid"])
+        self._write_json_safely(path, json.dumps(payload, indent=2, ensure_ascii=False))
+        self._rewrite_transcript_files(meeting)
+        log.info("speaker named meeting=%s speaker_id=%s lines=%s remembered=%s", meeting_id, speaker_id, changed, bool(profile))
+        return {"renamed_lines": changed, "name": name, "remembered": bool(profile), "profile": profile}
+
+    def edit_segment(self, meeting_id: str, segment_id: int, text: str | None = None, speaker: str | None = None) -> dict:
+        meeting = self.db.get_meeting(meeting_id)
+        if not meeting: raise KeyError("Meeting not found.")
+        row = self.db.update_segment(meeting_id, segment_id, text=text, speaker=speaker)
+        if not row: raise KeyError("Transcript line not found.")
+        self._rewrite_transcript_files(meeting)
+        return row
+
     @staticmethod
     def _transcript_text(segments: list[dict]) -> str:
+        """The analyst reads the English rendering when one exists; the original text stays untouched on disk."""
         return "\n".join(
-            f"{segment.get('speaker') or 'Speaker'}: {str(segment.get('text', '')).strip()}"
-            for segment in segments if str(segment.get("text", "")).strip()
+            f"{segment.get('speaker') or 'Speaker'}: {str(segment.get('text_en') or segment.get('text', '')).strip()}"
+            for segment in segments if str(segment.get("text_en") or segment.get("text", "")).strip()
         ).strip()
 
     @staticmethod
@@ -297,6 +373,8 @@ class MeetingService:
             metadata = {"title": meeting["title"], "date": started.date().isoformat(), "start_time": started.isoformat(),
                 "end_time": ended.isoformat(), "duration_minutes": max(1, round(meeting["duration_seconds"] / 60))}
             def analysis_progress(value, detail): runtime.processing_update(progress=value, stage_detail=detail)
+            metadata["template"] = meeting.get("template") or "engineering"
+            metadata["speakers"] = self._speaker_context(result["segments"])
             analysis = await asyncio.to_thread(self.llm.analyze, text, metadata, analysis_progress)
             runtime.processing_update(progress=94, stage_detail="Validating and saving the meeting record")
             analysis_path = self._save_analysis_artifacts(folder, analysis)

@@ -268,7 +268,7 @@ def test_transcription_pipeline_reports_and_removes_cross_track_echo(tmp_path):
 
     (tmp_path / "recording-system.wav").write_bytes(b"system")
     (tmp_path / "recording-microphone.wav").write_bytes(b"microphone")
-    service = TranscriptionService(user_name="Hussain")
+    service = TranscriptionService(user_name="Hussain", backend="faster", task="translate")
     service._model = Model()
 
     result = service.transcribe(tmp_path / "recording.wav")
@@ -531,17 +531,21 @@ def test_detector_ends_meeting_only_after_consecutive_confirmations():
 
 def test_detector_parses_osascript_output(monkeypatch):
     import subprocess
-    from backend.detection.meet_detector import DetectionError, MeetDetector
+    from backend.detection.meet_detector import BrowserTabProvider, DetectionError, MeetDetector
     import pytest
-    detector = MeetDetector()
+    detector = MeetDetector(providers=[BrowserTabProvider("Google Chrome")])
     outputs = {}
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args, outputs["code"], outputs["out"], outputs.get("err", ""))
     monkeypatch.setattr(subprocess, "run", fake_run)
     outputs.update(code=0, out="MEET\thttps://meet.google.com/abc-defg-hij\tMeet – abc\n")
-    tab = detector.detect(); assert (tab.url, tab.title) == ("https://meet.google.com/abc-defg-hij", "Meet – abc")
+    tab = detector.detect(); assert (tab.url, tab.title, tab.platform) == ("https://meet.google.com/abc-defg-hij", "Meet – abc", "google_meet")
     outputs.update(code=0, out="MEET\thttps://meet.google.com/abc-defg-hij\t\n")
     assert detector.detect().title == "Google Meet"  # empty title must not read as "no meeting"
+    outputs.update(code=0, out="MEET\thttps://us05web.zoom.us/j/123456?pwd=x\tZoom Meeting\n")
+    assert detector.detect().platform == "zoom"
+    outputs.update(code=0, out="MEET\thttps://teams.microsoft.com/v2/\tMeeting | Microsoft Teams\n")
+    assert detector.detect().platform == "teams"
     outputs.update(code=0, out="NONE\n")
     assert detector.detect() is None
     outputs.update(code=1, out="", err="execution error: Google Chrome got an error")
@@ -549,6 +553,28 @@ def test_detector_parses_osascript_output(monkeypatch):
     def timeout_run(*args, **kwargs): raise subprocess.TimeoutExpired("osascript", 15)
     monkeypatch.setattr(subprocess, "run", timeout_run)
     with pytest.raises(DetectionError): detector.detect()
+
+
+def test_browser_script_uses_explicit_delimiter_not_tab_keyword():
+    # Inside `tell application "Google Chrome"` the word `tab` is Chrome's tab class, not a character.
+    from backend.detection.meet_detector import BrowserTabProvider, TeamsAppProvider
+    assert "& tab &" not in BrowserTabProvider("Google Chrome").script
+    assert "ASCII character 9" in BrowserTabProvider("Google Chrome").script
+    assert "& tab &" not in TeamsAppProvider.SCRIPT
+
+
+def test_detector_combines_providers_and_tolerates_partial_failures():
+    from backend.detection.meet_detector import DetectionError, MeetDetector, MeetTab
+    import pytest
+    class Broken:
+        def detect(self, timeout): raise DetectionError("no accessibility permission")
+    class Quiet:
+        def detect(self, timeout): return None
+    class Zoom:
+        def detect(self, timeout): return MeetTab("Zoom meeting", "zoom://meeting", "zoom")
+    assert MeetDetector(providers=[Broken(), Quiet(), Zoom()]).detect().platform == "zoom"
+    assert MeetDetector(providers=[Broken(), Quiet()]).detect() is None   # one working provider is enough for "no meeting"
+    with pytest.raises(DetectionError): MeetDetector(providers=[Broken(), Broken()]).detect()
 
 
 def test_recorder_health_reports_dead_capture_process(tmp_path):
@@ -664,3 +690,167 @@ def test_delete_endpoint_maps_errors(tmp_path):
     assert client.delete("/api/meetings/ok").json() == {"deleted": "ok", "files_removed": True}
     assert client.delete("/api/meetings/missing").status_code == 404
     assert client.delete("/api/meetings/busy").status_code == 409
+
+
+# ---------------------------------------------------------------- transcription source of truth
+
+
+def test_translation_is_attached_without_touching_original_text():
+    original = [{"start": 0.0, "end": 4.0, "text": "ہم کل ریلیز کریں گے"}, {"start": 4.5, "end": 8.0, "text": "ٹھیک ہے"}]
+    english = [{"start": 0.2, "end": 3.8, "text": "We will release tomorrow"}, {"start": 4.6, "end": 7.9, "text": "Okay"}]
+    TranscriptionService._attach_translation(original, english)
+    assert original[0]["text"] == "ہم کل ریلیز کریں گے" and original[0]["text_en"] == "We will release tomorrow"
+    assert original[1]["text_en"] == "Okay"
+
+
+def test_english_meeting_skips_translation_pass(monkeypatch):
+    service = TranscriptionService(user_name="Hussain", backend="faster", task="transcribe", translation="auto")
+    calls = []
+    def fake_decode(path, task):
+        calls.append(task)
+        return [{"start": 0.0, "end": 2.0, "text": "Ship it.", "avg_logprob": -0.1, "no_speech_prob": 0.0}], "en"
+    monkeypatch.setattr(service, "_decode_faster", fake_decode)
+    segments, language, output = service._transcribe_track(Path("x.wav"))
+    assert calls == ["transcribe"] and segments[0]["text_en"] == "Ship it." and output == "en"
+
+
+def test_non_english_meeting_gets_separate_english_pass(monkeypatch):
+    service = TranscriptionService(user_name="Hussain", backend="faster", task="transcribe", translation="auto")
+    calls = []
+    def fake_decode(path, task):
+        calls.append(task)
+        if task == "transcribe":
+            return [{"start": 0.0, "end": 2.0, "text": "کام ہو گیا", "avg_logprob": -0.2, "no_speech_prob": 0.0}], "ur"
+        return [{"start": 0.1, "end": 1.9, "text": "The work is done", "avg_logprob": -0.2, "no_speech_prob": 0.0}], "ur"
+    monkeypatch.setattr(service, "_decode_faster", fake_decode)
+    segments, language, output = service._transcribe_track(Path("x.wav"))
+    assert calls == ["transcribe", "translate"]
+    assert segments[0]["text"] == "کام ہو گیا" and segments[0]["text_en"] == "The work is done" and language == "ur"
+
+
+def test_transcript_text_for_analysis_prefers_english_rendering():
+    text = MeetingService._transcript_text([{"speaker": "Speaker 1", "text": "کام ہو گیا", "text_en": "The work is done"},
+                                            {"speaker": "Hussain", "text": "Great."}])
+    assert text == "Speaker 1: The work is done\nHussain: Great."
+
+
+# ---------------------------------------------------------------- diarization and naming
+
+
+class _FakeExtractor:
+    """Voice A lives in [1,0], voice B in [0,1]; the segment time decides which voice it is."""
+    def __init__(self, voice_of): self.voice_of = voice_of
+    def embed(self, samples):
+        key = round(len(samples) / 16000, 1)
+        return self.voice_of(key)
+
+
+def _diarizer_with(db, tmp_path, monkeypatch, plan):
+    from backend.transcription import diarize
+    import numpy as np
+    monkeypatch.setattr(diarize, "decode_audio", lambda *a, **k: np.zeros(16000 * 60, dtype=np.float32), raising=False)
+    import faster_whisper.audio
+    monkeypatch.setattr(faster_whisper.audio, "decode_audio", lambda *a, **k: np.zeros(16000 * 60, dtype=np.float32))
+    return diarize.SpeakerDiarizer(db, threshold=0.5, match_threshold=0.7, extractor=_FakeExtractor(plan))
+
+
+def test_diarizer_clusters_voices_and_short_segments_inherit_neighbours(monkeypatch, tmp_path):
+    db = Database(tmp_path / "test.db")
+    # durations encode the voice: 5s segments are voice A, 6s segments are voice B
+    plan = lambda seconds: [1.0, 0.02] if seconds == 5.0 else [0.02, 1.0]
+    diarizer = _diarizer_with(db, tmp_path, monkeypatch, plan)
+    segments = [
+        {"start": 0.0, "end": 5.0, "text": "a1"}, {"start": 5.0, "end": 5.5, "text": "short"},
+        {"start": 10.0, "end": 16.0, "text": "b1"}, {"start": 20.0, "end": 25.0, "text": "a2"},
+        {"start": 30.0, "end": 36.0, "text": "b2"}, {"start": 40.0, "end": 46.0, "text": "b3"},
+    ]
+    summary = diarizer.label(tmp_path / "recording-system.wav", segments)
+    assert [s["speaker"] for s in segments] == ["Speaker 2", "Speaker 2", "Speaker 1", "Speaker 2", "Speaker 1", "Speaker 1"]
+    assert summary["spk_1"]["seconds"] == 18.0 and summary["spk_1"]["name"] is None and len(summary["spk_1"]["centroid"]) == 2
+
+
+def test_diarizer_folds_noise_voices_into_nearest_real_voice(monkeypatch, tmp_path):
+    db = Database(tmp_path / "test.db")
+    plan = lambda seconds: [1.0, 0.02] if seconds == 5.0 else [0.6, 0.8]   # the 2s voice is close to A but separate
+    diarizer = _diarizer_with(db, tmp_path, monkeypatch, plan)
+    segments = [{"start": 0.0, "end": 5.0, "text": "a1"}, {"start": 10.0, "end": 15.0, "text": "a2"}, {"start": 20.0, "end": 22.0, "text": "blip"}]
+    summary = diarizer.label(tmp_path / "recording-system.wav", segments)
+    assert len(summary) == 1 and [s["speaker"] for s in segments] == ["Speaker 1"] * 3
+
+
+def test_named_voice_is_recognised_in_later_meetings(monkeypatch, tmp_path):
+    db = Database(tmp_path / "test.db")
+    plan = lambda seconds: [1.0, 0.02] if seconds == 10.0 else [0.02, 1.0]
+    diarizer = _diarizer_with(db, tmp_path, monkeypatch, plan)
+    diarizer.remember("Ali", [1.0, 0.0])
+    segments = [{"start": 0.0, "end": 10.0, "text": "a"}, {"start": 15.0, "end": 24.0, "text": "b"}]
+    summary = diarizer.label(tmp_path / "recording-system.wav", segments)
+    assert segments[0]["speaker"] == "Ali" and segments[1]["speaker"].startswith("Speaker ")
+    matched = [v for v in summary.values() if v["name"] == "Ali"][0]
+    assert matched["similarity"] >= 0.7
+    assert db.upsert_voice_profile("Ali", [0.9, 0.1])["samples"] == 2  # repeated naming refines the centroid
+
+
+def test_name_speaker_updates_rows_files_and_remembers_voice(monkeypatch, tmp_path):
+    db = Database(tmp_path / "test.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    audio = folder / "recording.wav"; audio.write_bytes(b"x")
+    db.create_meeting("m", "Meeting", "2026-08-10T10:00:00+05:00", audio)
+    segments = [{"start": 0, "end": 1, "speaker": "Speaker 1", "speaker_id": "spk_1", "text": "hello", "text_en": "hello"},
+                {"start": 1, "end": 2, "speaker": "Speaker 2", "speaker_id": "spk_2", "text": "hi", "text_en": "hi"}]
+    transcript_path = folder / "transcript.json"
+    transcript_path.write_text(json.dumps({"segments": segments, "speakers": {"spk_1": {"label": "Speaker 1", "name": None, "centroid": [1.0, 0.0]}}}))
+    db.save_transcript("m", segments, transcript_path)
+    service = MeetingService.__new__(MeetingService); service.db = db
+    service.settings = type("S", (), {"user_name": "Hussain"})()
+    class Remember:
+        def remember(self, name, centroid): return db.upsert_voice_profile(name, centroid)
+    service.diarizer = Remember()
+    result = service.name_speaker("m", "Ali", speaker_id="spk_1", remember=True)
+    assert result["renamed_lines"] == 1 and result["remembered"] is True
+    assert [s["speaker"] for s in db.transcript("m")] == ["Ali", "Speaker 2"]
+    saved = json.loads(transcript_path.read_text())
+    assert saved["speakers"]["spk_1"]["name"] == "Ali" and saved["segments"][0]["speaker"] == "Ali"
+    assert (folder / "transcript.txt").read_text().splitlines()[0] == "Ali: hello"
+    assert db.voice_profiles()[0]["name"] == "Ali"
+    assert service._speaker_context(db.transcript("m")) == {"user": "Hussain", "named": ["Ali"], "unnamed": ["Speaker 2"]}
+
+
+def test_segment_edit_marks_row_and_regenerates_transcript_files(tmp_path):
+    db = Database(tmp_path / "test.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    audio = folder / "recording.wav"; audio.write_bytes(b"x")
+    db.create_meeting("m", "Meeting", "2026-08-10T10:00:00+05:00", audio)
+    transcript_path = folder / "transcript.json"
+    transcript_path.write_text(json.dumps({"segments": []}))
+    db.save_transcript("m", [{"start": 0, "end": 1, "speaker": "Speaker 1", "text": "fix the logs", "text_en": "fix the logs"}], transcript_path)
+    service = MeetingService.__new__(MeetingService); service.db = db
+    segment_id = db.transcript("m")[0]["id"]
+    row = service.edit_segment("m", segment_id, text="fix the logos")
+    assert row["text"] == "fix the logos" and row["text_en"] == "fix the logos" and row["edited"] == 1
+    assert json.loads(transcript_path.read_text())["edited"] is True
+    assert (folder / "transcript.txt").read_text() == "Speaker 1: fix the logos"
+
+
+# ---------------------------------------------------------------- evidence to audio, templates
+
+
+def test_evidence_locates_segment_and_spans_neighbours():
+    from backend.analysis.evidence import locate_evidence
+    segments = [{"id": 1, "start": 0.0, "end": 5.0, "speaker": "Ali", "text": "Please fix the logos before"},
+                {"id": 2, "start": 5.0, "end": 9.0, "speaker": "Ali", "text": "the demo tomorrow."},
+                {"id": 3, "start": 20.0, "end": 25.0, "speaker": "Hussain", "text": "I will update the backend."}]
+    assert locate_evidence("I will update the backend", segments) == {"segment_id": 3, "start": 20.0, "end": 25.0, "speaker": "Hussain"}
+    assert locate_evidence("fix the logos before the demo tomorrow", segments) == {"segment_id": 1, "start": 0.0, "end": 9.0, "speaker": "Ali"}
+    assert locate_evidence("something never said in this meeting at all", segments) is None
+
+
+def test_templates_and_speaker_legend_reach_the_system_prompt():
+    from backend.analysis.ollama import LLMService
+    from backend.analysis.templates import get_template, list_templates
+    assert get_template("nonsense").key == "engineering" and any(t["default"] for t in list_templates())
+    service = LLMService("http://127.0.0.1:11434", "test", "Hussain")
+    service._meeting_context = {"template": "client", "speakers": {"named": ["Ali"], "unnamed": ["Speaker 2"]}}
+    prompt = service._system_prompt("2026-08-10")
+    assert "MEETING TYPE: CLIENT / STAKEHOLDER CALL" in prompt and "Confirmed people: Ali" in prompt and "Unnamed voices: Speaker 2" in prompt
+    assert "{" not in prompt.split("SPEAKER LABELS")[1]

@@ -210,6 +210,16 @@ Meeting AI reads `.env` through `pydantic-settings`. Unknown environment variabl
 | `OLLAMA_NUM_CTX` | `32768` | Ollama context window allocated for prompts, evidence, and report output |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model |
 | `WHISPER_LANGUAGE` | empty | Automatic source-language detection |
+| `WHISPER_TASK` | `transcribe` | Keep the original spoken language as the source of truth. `translate` is the legacy mode that translates while transcribing and loses the original wording |
+| `WHISPER_TRANSLATION` | `auto` | Separate English pass: `auto` only when the meeting is not in English, `always`, or `never`. Stored as `text_en`; the analyst reads it, the original `text` is never modified |
+| `WHISPER_BACKEND` | `auto` | `mlx` runs the same weights on the Apple GPU (Metal); `faster` is the CPU path. `auto` picks MLX on Apple Silicon |
+| `WHISPER_OFFLINE` | `true` | Once weights are cached, never contact the network for them |
+| `DIARIZATION_ENABLED` | `true` | Separate remote participants by voice on the system track (CAM++ embeddings via sherpa-onnx, local) |
+| `DIARIZATION_THRESHOLD` | `0.62` | Cosine distance at which two voices are considered different people (0.60–0.65 is the stable band on real meetings) |
+| `VOICE_MATCH_THRESHOLD` | `0.70` | Cosine similarity required to reuse a remembered name automatically |
+| `DETECTION_BROWSERS` | `Google Chrome` | Chromium-family browsers whose tabs are scanned for Meet, Zoom web, and Teams web |
+| `DETECT_ZOOM_APP` | `true` | Detect a Zoom desktop meeting (the `CptHost` helper only runs during a call) |
+| `DETECT_TEAMS_APP` | `true` | Detect a Teams desktop meeting window (needs Accessibility access; silently skipped otherwise) |
 | `WHISPER_TASK` | `translate` | Translate recognized speech to English; use `transcribe` to preserve language |
 | `WHISPER_INITIAL_PROMPT` | technical meeting vocabulary | Helps preserve names and technical terminology |
 | `DATABASE_PATH` | `data/meetings.db` | SQLite location |
@@ -253,7 +263,7 @@ After changing a permission, fully stop and restart Terminal, Codex, VS Code, or
 
 ## 7. Meeting detection and explicit approval
 
-`MeetDetector` runs a small AppleScript every configured interval. It examines Chrome tabs and returns the first URL beginning with `https://meet.google.com/`.
+`MeetDetector` polls a list of providers every configured interval: a browser-tab provider per configured Chromium browser (Google Meet, Zoom web, Teams web URLs), a Zoom desktop provider (the `CptHost` process exists only during a call), and a Teams desktop provider (meeting window title via System Events). The first provider that reports a meeting wins; a provider that errors is ignored for that tick. The detected platform is stored on the meeting.
 
 Detection only means a Meet page is open. It does not prove that a call is active. Therefore:
 
@@ -264,6 +274,10 @@ Detection only means a Meet page is open. It does not prove that a call is activ
 - a detection check that fails (Chrome busy, AppleScript error, timeout) is logged and never treated as the meeting ending;
 - a watchdog stops and saves the recording if the audio capture process dies or the `MAX_RECORDING_HOURS` limit is reached;
 - the manual **Stop recording** button remains the dependable fallback.
+
+### Meeting templates
+
+A template is chosen next to **Start recording** and stored on the meeting. Templates (`backend/analysis/templates.py`) only append guidance to the analyst's system prompt — engineering (default), stand-up, one-on-one, client call, interview, general — so they change emphasis, never the evidence rules.
 
 ## 8. Audio capture
 
@@ -294,6 +308,20 @@ After recording stops, ffmpeg creates `recording.wav`, a convenient 16 kHz mono 
 The source tracks—not the preview—are the archival recordings. If preview generation fails, the original system and microphone WAV files remain usable and processing continues from them.
 
 ### 8.4 Audio quality gate
+
+### Transcription engine
+
+On Apple Silicon the `large-v3` weights run through `mlx-whisper` on the GPU; measured on a real 41-minute meeting: system track 87 s, microphone track 18 s, full pipeline with diarization 111 s (the CPU path took ~55 minutes). The CPU path (`faster-whisper`) remains as fallback and uses beam search; MLX decodes greedily with the same temperature fallback, VAD, and thresholds. Word-level agreement between the two on that meeting was 94.6%, the differences being fillers at chunk edges.
+
+The transcript keeps the **original spoken language** in `text`. When the meeting is not in English a second Whisper pass produces `text_en`, aligned to the original segments by time; the LLM analyst reads `text_en` so evidence checks still work, while the UI shows both. Each line stores Whisper's `avg_logprob` and `no_speech_prob`; low-confidence lines are flagged in the UI and lower the quality score.
+
+### Speakers
+
+The system track is diarized locally: every line gets a CAM++ voice embedding, embeddings are clustered (average linkage, cosine distance), voices are ordered by speaking time and labelled `Speaker 1…N`. The user can name a voice once from the transcript; with **Remember voice** the centroid is stored in `voice_profiles`, and later meetings label that person automatically (`recognised NN%`). Unnamed voices are passed to the analyst as distinct but anonymous people; confirmed names are treated as real attendees who can own tasks.
+
+### Evidence playback and corrections
+
+Every task and requested change is mapped back to the transcript line its evidence came from (`evidence_location`), and the detail page plays that span from the saved recording. Transcript lines can be corrected in place (double-click), speakers renamed, and the analysis re-run from the corrected transcript without re-running Whisper.
 
 Before transcription, ffmpeg `volumedetect` measures the selected saved track. A peak above `-60 dB` is treated as audible. Definite silence stops processing so Whisper and the LLM cannot fabricate a meeting from empty audio.
 
@@ -637,6 +665,12 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/transcript` | Timestamped transcript segments |
 | `GET` | `/meetings/{id}/analysis` | Current `analysis.json` |
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after analysis completes |
+| `GET` | `/meetings/{id}/transcript` | `{segments, speakers}`; segments carry `text`, `text_en`, confidence, `speaker_id`, `edited` |
+| `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct one line's text or speaker; transcript files are regenerated |
+| `POST` | `/meetings/{id}/speakers` | Name a diarized voice (`speaker_id` or `current_label`); `remember` stores the voice for future meetings |
+| `GET` | `/meetings/{id}/audio?track=mix\|system\|microphone` | Stream the saved recording (range requests) for evidence playback |
+| `GET` / `DELETE` | `/voices`, `/voices/{name}` | List or forget remembered voices |
+| `GET` | `/templates` | Meeting templates for the Start picker |
 | `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its folder under `RECORDINGS_PATH`, and every derived row (refused while recording, processing, or queued) |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Tasks owned by configured user aliases |

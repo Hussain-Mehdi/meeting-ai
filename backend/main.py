@@ -23,17 +23,20 @@ recovered_meetings = db.recover_interrupted_meetings()
 if recovered_meetings:
     log.warning("marked interrupted meetings as retryable count=%s resumable=%s", recovered_meetings, interrupted_processing)
 service = MeetingService(settings, db)
-detector = MeetDetector(timeout=settings.detection_timeout, end_confirmations=settings.detection_end_confirmations)
+detector = MeetDetector(timeout=settings.detection_timeout, end_confirmations=settings.detection_end_confirmations,
+                        browsers=settings.browsers, zoom_app=settings.detect_zoom_app, teams_app=settings.detect_teams_app)
 
 
 async def detected(tab):
     status = runtime.snapshot()
     if status["state"] in ("idle", "failed"):
         if status["state"] != "idle": runtime.transition(MeetingState.IDLE, error=None)
-        runtime.transition(MeetingState.DETECTED, meeting_detected=True, detected_title=tab.title, detected_url=tab.url)
+        runtime.transition(MeetingState.DETECTED, meeting_detected=True, detected_title=tab.title, detected_url=tab.url,
+                           detected_platform=tab.platform)
         runtime.transition(MeetingState.WAITING_FOR_CONFIRMATION)
-        notify("Google Meet detected", "A meeting appears to be open. Open Meeting AI to start recording.", True)
-        log.info("Meet detected url=%s", tab.url)
+        label = {"google_meet": "Google Meet", "zoom": "Zoom", "teams": "Microsoft Teams"}.get(tab.platform, "Meeting")
+        notify(f"{label} detected", "A meeting appears to be open. Open Meeting AI to start recording.", True)
+        log.info("meeting detected platform=%s url=%s", tab.platform, tab.url)
 
 
 async def ended(tab):
@@ -43,7 +46,7 @@ async def ended(tab):
         try: await service.stop_and_process()
         except Exception: log.exception("automatic recording stop failed")
     elif status["state"] in ("detected", "waiting_for_confirmation"):
-        runtime.transition(MeetingState.IDLE, meeting_detected=False, detected_title=None, detected_url=None)
+        runtime.transition(MeetingState.IDLE, meeting_detected=False, detected_title=None, detected_url=None, detected_platform=None)
 
 
 @asynccontextmanager

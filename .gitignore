@@ -10,3 +10,4 @@ data/meetings/*
 logs/*.log
 tmp/
 output/pdf/
+data/models/
