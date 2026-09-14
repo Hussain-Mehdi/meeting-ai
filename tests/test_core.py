@@ -854,3 +854,50 @@ def test_templates_and_speaker_legend_reach_the_system_prompt():
     prompt = service._system_prompt("2026-08-10")
     assert "MEETING TYPE: CLIENT / STAKEHOLDER CALL" in prompt and "Confirmed people: Ali" in prompt and "Unnamed voices: Speaker 2" in prompt
     assert "{" not in prompt.split("SPEAKER LABELS")[1]
+
+
+# ---------------------------------------------------------------- transcript export
+
+
+def test_transcript_export_formats(tmp_path):
+    from backend.transcription.export import transcript_as_json, transcript_as_srt, transcript_as_text, transcript_filename
+    meeting = {"id": "m", "title": "Weekly <sync>", "started_at": "2026-09-10T17:22:43+05:00", "duration_seconds": 2482}
+    segments = [
+        {"id": 1, "start": 0.0, "end": 4.2, "speaker": "Ali", "text": "کام ہو گیا", "text_en": "The work is done"},
+        {"id": 2, "start": 65.5, "end": 70.0, "speaker": "Hussain", "text": "Great, ship it.", "text_en": "Great, ship it."},
+    ]
+    text = transcript_as_text(meeting, segments)
+    assert text.startswith("Weekly <sync>\n10 September 2026, 17:22\nDuration: 41 minutes\n")
+    assert "[0:00] Ali: کام ہو گیا\n    (The work is done)\n[1:05] Hussain: Great, ship it.\n" in text
+    assert "(Great, ship it.)" not in text                       # identical English is not repeated
+    assert "Ali: The work is done" in transcript_as_text(meeting, segments, language="english")
+    assert transcript_as_text(meeting, segments, language="original", timestamps=False).endswith("Ali: کام ہو گیا\nHussain: Great, ship it.\n")
+    srt = transcript_as_srt(segments)
+    assert srt.startswith("1\n00:00:00,000 --> 00:00:04,200\nAli: کام ہو گیا\n\n2\n00:01:05,500 --> 00:01:10,000\nHussain: Great, ship it.\n")
+    payload = json.loads(transcript_as_json(meeting, segments, {"spk_1": {"label": "Ali", "centroid": [1, 2]}}))
+    assert payload["meeting"]["title"] == "Weekly <sync>" and payload["segments"][0]["text_en"] == "The work is done"
+    assert "centroid" not in payload["speakers"]["spk_1"]      # voice embeddings never leave the app
+    assert transcript_filename("Weekly <sync>", "2026-09-10T17:22:43+05:00", "txt") == "weekly-sync-2026-09-10-transcript.txt"
+
+
+def test_transcript_export_endpoint(tmp_path):
+    from fastapi import FastAPI
+    from backend.api.routes import create_router
+    db = Database(tmp_path / "test.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    db.create_meeting("m", "Planning", "2026-09-10T17:22:43+05:00", folder / "recording.wav")
+    db.create_meeting("empty", "Silent", "2026-09-10T18:00:00+05:00", folder / "other.wav")
+    db.save_transcript("m", [{"start": 0, "end": 1, "speaker": "Ali", "text": "hello", "text_en": "hello"}], folder / "transcript.json")
+    app = FastAPI(); app.include_router(create_router(db, object()))
+    client = TestClient(app)
+    response = client.get("/api/meetings/m/transcript/export")
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/plain")
+    assert 'filename="planning-2026-09-10-transcript.txt"' in response.headers["content-disposition"]
+    assert "[0:00] Ali: hello" in response.text
+    inline = client.get("/api/meetings/m/transcript/export?download=false")
+    assert "content-disposition" not in inline.headers and inline.text == response.text
+    assert 'planning-2026-09-10-transcript.srt"' in client.get("/api/meetings/m/transcript/export?format=srt").headers["content-disposition"]
+    assert client.get("/api/meetings/m/transcript/export?format=json").json()["segments"][0]["speaker"] == "Ali"
+    assert client.get("/api/meetings/empty/transcript/export").status_code == 404
+    assert client.get("/api/meetings/missing/transcript/export").status_code == 404
+    assert client.get("/api/meetings/m/transcript/export?format=docx").status_code == 422

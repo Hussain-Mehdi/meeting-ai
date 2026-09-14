@@ -10,6 +10,7 @@ from backend.analysis.templates import list_templates
 from backend.audio.devices import AudioDeviceManager
 from backend.config import get_settings
 from backend.reports.pdf import build_meeting_report, content_disposition, report_filename
+from backend.transcription.export import transcript_as_json, transcript_as_srt, transcript_as_text, transcript_filename
 from backend.state import runtime
 
 
@@ -114,6 +115,31 @@ def create_router(db, service):
         except Exception: speakers = {}
         speakers = {key: {k: v for k, v in info.items() if k != "centroid"} for key, info in speakers.items()}
         return {"segments": db.transcript(meeting_id), "speakers": speakers}
+
+    @router.get("/meetings/{meeting_id}/transcript/export")
+    def export_transcript(meeting_id: str, format: Literal["txt", "srt", "json"] = Query("txt"),
+                          language: Literal["both", "original", "english"] = Query("both"),
+                          timestamps: bool = Query(True), download: bool = Query(True)):
+        """The whole transcript as a file (or inline text for copying)."""
+        value = db.get_meeting(meeting_id)
+        if not value: raise HTTPException(404, "Meeting not found")
+        segments = db.transcript(meeting_id)
+        if not segments: raise HTTPException(404, "No transcript is saved for this meeting")
+        if format == "srt":
+            body, media = transcript_as_srt(segments, language), "application/x-subrip"
+        elif format == "json":
+            speakers = {}
+            try:
+                path = Path(value.get("transcript_path") or "")
+                if path.exists(): speakers = json.loads(path.read_text(encoding="utf-8")).get("speakers") or {}
+            except Exception: speakers = {}
+            body, media = transcript_as_json(value, segments, speakers), "application/json"
+        else:
+            body, media = transcript_as_text(value, segments, language, timestamps), "text/plain"
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        if download:
+            headers["Content-Disposition"] = content_disposition(transcript_filename(value.get("title") or "Meeting", value.get("started_at") or "", format))
+        return Response(content=body.encode("utf-8"), media_type=f"{media}; charset=utf-8", headers=headers)
 
     @router.patch("/meetings/{meeting_id}/transcript/{segment_id}")
     def edit_segment(meeting_id: str, segment_id: int, body: SegmentEdit):

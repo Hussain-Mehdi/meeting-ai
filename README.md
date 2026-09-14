@@ -520,6 +520,7 @@ Base URL: `http://127.0.0.1:8000/api`
 | `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct a transcript line |
 | `POST` | `/meetings/{id}/speakers` | Name a diarized voice, optionally remembering it for future meetings |
 | `GET` | `/meetings/{id}/audio` | Stream the saved recording for evidence playback |
+| `GET` | `/meetings/{id}/transcript/export?format=txt\|srt\|json&language=both\|original\|english` | Whole transcript as a download (`download=false` returns it inline for copying) |
 | `GET` | `/templates`, `/voices` | Meeting templates; remembered voices |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Personal tasks |
