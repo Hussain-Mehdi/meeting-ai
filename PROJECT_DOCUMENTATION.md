@@ -669,6 +669,7 @@ Base URL: `http://127.0.0.1:8000/api`
 | `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct one line's text or speaker; transcript files are regenerated |
 | `POST` | `/meetings/{id}/speakers` | Name a diarized voice (`speaker_id` or `current_label`); `remember` stores the voice for future meetings |
 | `GET` | `/meetings/{id}/audio?track=mix\|system\|microphone` | Stream the saved recording (range requests) for evidence playback |
+| `GET` | `/meetings/{id}/transcript/export?format=txt\|srt\|json&language=both\|original\|english` | Whole transcript as a download (`download=false` returns it inline for copying) |
 | `GET` / `DELETE` | `/voices`, `/voices/{name}` | List or forget remembered voices |
 | `GET` | `/templates` | Meeting templates for the Start picker |
 | `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its folder under `RECORDINGS_PATH`, and every derived row (refused while recording, processing, or queued) |
