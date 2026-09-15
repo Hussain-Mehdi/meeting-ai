@@ -315,6 +315,14 @@ Open:
 
 Stop both servers with **Control+C**. The backend does not auto-reload, so restart after backend or prompt changes.
 
+### Access from other devices on your network
+
+```bash
+./scripts/start.sh --lan
+```
+
+The script prints a `Network:` URL such as `http://192.168.1.11:3000`; open it on your phone or another computer on the same Wi-Fi. The backend stays bound to `127.0.0.1` (the web app proxies API calls to it), so only port 3000 is exposed. There is no login: anyone on the network can view meetings and start or stop recordings, so use `--lan` only on a trusted network. macOS may ask once to allow `node` to accept incoming connections.
+
 ## Typical workflow
 
 1. Start Ollama and Meeting AI.
