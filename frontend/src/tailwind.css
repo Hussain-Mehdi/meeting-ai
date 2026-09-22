@@ -1,0 +1,53 @@
+/* Tailwind for the ported Beautiful UI components (MIT, https://www.beautifului.dev).
+   Preflight is deliberately NOT imported: it would reset the hand-written CSS the rest
+   of the app relies on. Only the theme (design tokens) and utilities layers load, so
+   Tailwind classes are additive and cannot restyle existing markup. */
+/* Explicit order: the scoped reset in `base` must lose to Tailwind utilities, which an
+   unlayered rule would not (unlayered styles outrank every layer). */
+@layer theme, base, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Their components address colours through these names; map each onto the app's
+   own light/dark tokens so ported components theme themselves with everything else. */
+@theme inline {
+  --color-page: var(--bg);
+  --color-card: var(--surface);
+  --color-line: var(--border);
+  --color-line-soft: var(--border-soft);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-muted);
+  --color-ink-4: var(--text-faint);
+  --color-green: var(--success);
+  --color-green-tint: var(--success-bg);
+  --color-green-line: var(--success-border);
+  --color-red: var(--danger);
+  --color-red-solid: var(--danger-solid);
+  --color-red-tint: var(--danger-bg);
+  --color-red-line: var(--danger-border);
+  --color-amber: var(--warn-text);
+  --color-amber-tint: var(--warn-bg);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-surface: var(--surface);
+  --color-inset: var(--surface-hover);
+  --radius-card: 12px;
+  --shadow-card: 0 1px 2px var(--shadow-soft);
+}
+
+/* Bare custom properties for components that reference var(--ink) etc. directly. */
+:root { --ink: var(--text); --ink-2: var(--text-secondary); --ink-3: var(--text-muted); --line: var(--border); }
+
+/* Preflight is not imported, so browser defaults (grey button face, default border
+   colours) still apply. These resets are scoped to the ported components only, which
+   leaves every hand-written rule in the rest of the app untouched. */
+@layer base {
+  .bui button, .bui [role="checkbox"] { background: transparent; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
+  .bui button:disabled { cursor: not-allowed; }
+  .bui, .bui * { box-sizing: border-box; }
+  .bui p, .bui h2, .bui h3 { margin: 0; }
+  .bui svg { display: block; }
+}
+
+@keyframes shimmer-text { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }

@@ -181,6 +181,8 @@ meeting-ai/
 │   ├── src/styles.css              Main styling
 │   ├── src/processing.css          Processing display styling
 │   ├── src/theme.css               Light/dark colour tokens (every rule resolves through them)
+│   ├── src/tailwind.css            Tailwind (theme + utilities layers only, no preflight)
+│   ├── src/components/             Components adapted from Beautiful UI (MIT) — see NOTICE.md
 │   ├── src/recovery.css            Retry interface styling
 │   ├── package.json                Frontend scripts and packages
 │   └── vite.config.ts              Vite configuration
@@ -280,6 +282,15 @@ Detection only means a Meet page is open. It does not prove that a call is activ
 ### Meeting templates
 
 A template is chosen next to **Start recording** and stored on the meeting. Templates (`backend/analysis/templates.py`) only append guidance to the analyst's system prompt — engineering (default), stand-up, one-on-one, client call, interview, general — so they change emphasis, never the evidence rules.
+
+### Component library
+
+`TaskRows`, `LoadingState`, and `RecordsTable` are adapted from [Beautiful UI](https://www.beautifului.dev) (MIT; the licence and what changed are in `frontend/src/components/NOTICE.md`). Upstream they animate through scripted demo states; here each is driven by real data.
+
+They need Tailwind, which the rest of the app does not use. Two decisions keep the two systems from colliding:
+
+- **Preflight is not imported.** Only Tailwind's `theme` and `utilities` layers load, so Tailwind cannot reset the hand-written CSS. The small reset those components do need is scoped to `.bui` and lives in an explicit `@layer base`, declared before `utilities` so a utility class always wins over it.
+- **Their colour names map onto the app's tokens** (`--color-ink`, `--color-card`, `--color-green-tint`, …), so the ported components follow the light/dark theme with everything else and carry no colours of their own.
 
 ### Appearance
 

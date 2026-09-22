@@ -1,0 +1,9 @@
+/* Keyframes used by the components adapted from Beautiful UI (MIT). */
+@keyframes pixel-on { 0%, 100% { opacity: .15 } 50% { opacity: 1 } }
+@keyframes fade-up { 0% { opacity: 0; transform: translateY(8px) } 100% { opacity: 1; transform: translateY(0) } }
+@keyframes fade-in { 0% { opacity: 0 } 100% { opacity: 1 } }
+@keyframes pop-in { 0% { opacity: 0; transform: scale(.95) } 100% { opacity: 1; transform: scale(1) } }
+@keyframes spin { to { transform: rotate(1turn) } }
+@media (prefers-reduced-motion: reduce) {
+  [style*="animation"] { animation: none !important; }
+}
