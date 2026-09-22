@@ -23,13 +23,17 @@
 .transcript div.low p { border-left: 2px solid #e2c36b; padding-left: 8px; }
 .transcript div.edited p { border-left: 2px solid #5c9a67; padding-left: 8px; }
 .transcript b.unnamed { color: #8a8c85; font-weight: 500; }
-.segment-text { display: grid; grid-template-columns: 1fr 28px; column-gap: 8px; align-items: start; min-width: 0; }
+.segment-text { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: start; min-width: 0; }
+.line-actions { display: flex; align-items: center; gap: 2px; min-width: 56px; justify-content: flex-end; }
+.line-confirm { display: flex; gap: 4px; }
+.line-confirm .danger, .line-confirm .secondary { padding: 3px 8px; font-size: 11px; }
+.edit-line.delete:hover { color: #b53838; background: #fff3f1; border-color: #f0d2ce; }
 .segment-text p { min-width: 0; }
 .transcript .translation { display: block; color: #6f716b; font-size: 12px; margin-top: 4px; }
 .transcript .flag { display: inline-block; margin-left: 8px; font-size: 10px; color: #9a7b1c; background: #fbf4dd; border-radius: 8px; padding: 1px 6px; vertical-align: middle; }
 .transcript .flag.edited-flag { color: #3d7448; background: #edf5ee; }
 .edit-line { border: 1px solid transparent; background: transparent; color: #b5b6b1; cursor: pointer; padding: 4px; border-radius: 6px; opacity: 0; display: flex; align-items: center; justify-content: center; }
-.transcript > div:hover .edit-line, .edit-line:focus-visible { opacity: 1; }
+.transcript > div:hover .edit-line, .edit-line:focus-visible, .line-confirm { opacity: 1; }
 .edit-line:hover { color: #20211f; background: #f1f1ee; border-color: #e3e3df; }
 .segment-edit { display: grid; gap: 8px; min-width: 0; }
 .segment-edit textarea { width: 100%; box-sizing: border-box; min-height: 84px; border: 1px solid #9b9c96; border-radius: 7px; padding: 9px 11px; font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; outline: none; box-shadow: 0 0 0 3px #2221; }
@@ -41,3 +45,6 @@
 .transcript-export { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .transcript-export .secondary { padding: 5px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 5px; }
 .export-error { font-size: 12px; color: #b53838; }
+.review-banner { border-color: #cfe3d2; background: #edf5ee; }
+.processing.review { border-color: #cfe3d2; }
+.processing.review .processing-head .primary { padding: 7px 12px; font-size: 13px; }

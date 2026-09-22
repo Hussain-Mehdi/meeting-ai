@@ -525,7 +525,8 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/analysis` | Analysis JSON |
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after completion |
 | `DELETE` | `/meetings/{id}` | Permanently delete a meeting, its recordings, transcript, and report (refused while recording, processing, or queued) |
-| `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct a transcript line |
+| `PATCH` / `DELETE` | `/meetings/{id}/transcript/{segment_id}` | Correct or remove a transcript line |
+| `POST` | `/meetings/{id}/analyze` | Run the AI analysis after reviewing the transcript |
 | `POST` | `/meetings/{id}/speakers` | Name a diarized voice, optionally remembering it for future meetings |
 | `GET` | `/meetings/{id}/audio` | Stream the saved recording for evidence playback |
 | `GET` | `/meetings/{id}/transcript/export?format=txt\|srt\|json&language=both\|original\|english` | Whole transcript as a download (`download=false` returns it inline for copying) |

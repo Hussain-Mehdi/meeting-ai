@@ -228,6 +228,7 @@ Meeting AI reads `.env` through `pydantic-settings`. Unknown environment variabl
 | `DETECTION_TIMEOUT` | `15.0` | Seconds to wait for Chrome to answer one detection check; a timeout is logged and ignored |
 | `DETECTION_END_CONFIRMATIONS` | `5` | Consecutive "no Meet tab" readings required before an active recording is auto-stopped |
 | `MAX_RECORDING_HOURS` | `4.0` | A recording longer than this is stopped and saved automatically by the watchdog |
+| `AUTO_ANALYZE` | `false` | After a recording only the transcript is produced and the meeting waits in `transcribed` for review; the user presses **Analyze**. `true` restores the single-step flow |
 | `RESUME_INTERRUPTED_PROCESSING` | `true` | On startup, continue processing meetings whose transcription or analysis was cut off by a restart |
 | `DEFER_PROCESSING_WHILE_RECORDING` | `true` | Never start Whisper/Ollama while a recording is being captured; queued meetings wait until the recording stops |
 
@@ -318,6 +319,10 @@ The transcript keeps the **original spoken language** in `text`. When the meetin
 ### Speakers
 
 The system track is diarized locally: every line gets a CAM++ voice embedding, embeddings are clustered (average linkage, cosine distance), voices are ordered by speaking time and labelled `Speaker 1…N`. The user can name a voice once from the transcript; with **Remember voice** the centroid is stored in `voice_profiles`, and later meetings label that person automatically (`recognised NN%`). Unnamed voices are passed to the analyst as distinct but anonymous people; confirmed names are treated as real attendees who can own tasks.
+
+### Two-phase flow: transcribe, review, analyze
+
+By default a stopped recording is only transcribed. The meeting then rests in status `transcribed` (the processing worker is free for the next meeting), a notification says the transcript is ready, and the detail page opens the transcript under a **Transcript ready — review it before analysis** banner. The user can correct lines, delete lines, rename or name speakers, and only when they press **Analyze this transcript** does the LLM run — on the transcript exactly as reviewed, never on the raw one. Nothing reaches the analyst before that click. Set `AUTO_ANALYZE=true` to skip the review step.
 
 ### Evidence playback and corrections
 
@@ -523,6 +528,8 @@ stateDiagram-v2
     [*] --> idle
     idle --> recorded: queued
     recorded --> transcribing
+    transcribing --> transcribed: AUTO_ANALYZE=false (default)
+    transcribed --> transcribing: user presses Analyze
     transcribing --> analyzing
     analyzing --> completed
     recorded --> failed
@@ -667,6 +674,8 @@ Base URL: `http://127.0.0.1:8000/api`
 | `PATCH` | `/meetings/{id}/info` | Edit title and mentioned people after analysis completes |
 | `GET` | `/meetings/{id}/transcript` | `{segments, speakers}`; segments carry `text`, `text_en`, confidence, `speaker_id`, `edited` |
 | `PATCH` | `/meetings/{id}/transcript/{segment_id}` | Correct one line's text or speaker; transcript files are regenerated |
+| `DELETE` | `/meetings/{id}/transcript/{segment_id}` | Remove a line from the transcript (e.g. noise, cross-talk, something private) |
+| `POST` | `/meetings/{id}/analyze` | Run the AI analysis on the transcript as reviewed; the explicit go-ahead in the two-phase flow |
 | `POST` | `/meetings/{id}/speakers` | Name a diarized voice (`speaker_id` or `current_label`); `remember` stores the voice for future meetings |
 | `GET` | `/meetings/{id}/audio?track=mix\|system\|microphone` | Stream the saved recording (range requests) for evidence playback |
 | `GET` | `/meetings/{id}/transcript/export?format=txt\|srt\|json&language=both\|original\|english` | Whole transcript as a download (`download=false` returns it inline for copying) |

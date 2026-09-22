@@ -51,7 +51,7 @@ def test_second_meeting_queues_behind_active_processing(monkeypatch, tmp_path):
     machine = StateMachine(); monkeypatch.setattr(meeting_service_module, "runtime", machine)
     processed = []
 
-    async def fake_process(meeting_id, prefer_saved_transcript=False):
+    async def fake_process(meeting_id, prefer_saved_transcript=False, analyze=True):
         processed.append(meeting_id)
         machine.processing_transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id)
         await asyncio.sleep(0)
@@ -602,7 +602,7 @@ def test_processing_waits_until_active_recording_stops(monkeypatch, tmp_path):
     monkeypatch.setattr(meeting_service_module.asyncio, "sleep", lambda *_: real_sleep(0))
     started = []
 
-    async def fake_process(meeting_id, prefer_saved_transcript=False):
+    async def fake_process(meeting_id, prefer_saved_transcript=False, analyze=True):
         started.append(machine.snapshot()["recording"])
         machine.processing_transition(MeetingState.TRANSCRIBING, meeting_id=meeting_id)
         machine.processing_transition(MeetingState.ANALYZING); machine.processing_transition(MeetingState.COMPLETED)
@@ -901,3 +901,73 @@ def test_transcript_export_endpoint(tmp_path):
     assert client.get("/api/meetings/empty/transcript/export").status_code == 404
     assert client.get("/api/meetings/missing/transcript/export").status_code == 404
     assert client.get("/api/meetings/m/transcript/export?format=docx").status_code == 422
+
+
+# ---------------------------------------------------------------- two-phase pipeline: transcribe, review, analyze
+
+
+def _reviewable_service(monkeypatch, tmp_path, auto_analyze=False):
+    import backend.meetings.service as meeting_service_module
+    db = Database(tmp_path / "test.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    audio = folder / "recording.wav"; audio.write_bytes(b"audio")
+    db.create_meeting("m", "Planning", "2026-09-10T17:22:43+05:00", audio)
+    db.finish_recording("m", "2026-09-10T18:00:00+05:00", 2237)
+    service = MeetingService.__new__(MeetingService); service.db = db
+    service._queue = service._worker = None; service._pending = []
+    service.settings = type("S", (), {"auto_analyze": auto_analyze, "defer_processing_while_recording": True, "user_name": "Hussain"})()
+    service.recorder = type("R", (), {"measure_audio": staticmethod(lambda path: {"has_audible_audio": True})})()
+    transcript = {"segments": [{"start": 0, "end": 2, "speaker": "Speaker 1", "text": "Please fix the logos.", "text_en": "Please fix the logos."},
+                               {"start": 2, "end": 4, "speaker": "Speaker 1", "text": "um yeah", "text_en": "um yeah"}], "quality": {"score": 96}}
+    def fake_transcribe(path):
+        (Path(path).parent / "transcript.json").write_text(json.dumps(transcript)); return transcript
+    service.transcriber = type("T", (), {"transcribe": staticmethod(fake_transcribe)})()
+    analyses = []
+    class FakeLLM:
+        def analyze(self, text, metadata, progress=None):
+            analyses.append(text); return _analysis()
+    service.llm = FakeLLM()
+    machine = StateMachine(); monkeypatch.setattr(meeting_service_module, "runtime", machine)
+    monkeypatch.setattr(meeting_service_module, "notify", lambda *a, **k: None)
+    return db, service, machine, analyses
+
+
+def test_recording_stops_at_transcript_until_the_user_analyzes(monkeypatch, tmp_path):
+    db, service, machine, analyses = _reviewable_service(monkeypatch, tmp_path)
+    asyncio.run(service.process("m", analyze=False))
+    meeting = db.get_meeting("m")
+    assert meeting["status"] == "transcribed" and analyses == [] and meeting["summary"] == ""
+    assert machine.snapshot()["processing"]["state"] == "transcribed" and not machine.processing_busy()
+    assert (tmp_path / "m" / "transcript.json").exists() and len(db.transcript("m")) == 2
+
+    # the user deletes the filler line, then presses Analyze
+    filler = db.transcript("m")[1]["id"]
+    assert service.delete_segment("m", filler) == {"deleted": filler, "remaining": 1}
+    assert (tmp_path / "m" / "transcript.txt").read_text() == "Speaker 1: Please fix the logos."
+    scheduled = []
+    import backend.meetings.service as meeting_service_module
+    monkeypatch.setattr(meeting_service_module.asyncio, "create_task", lambda coro: (scheduled.append(coro), coro.close()))
+    assert asyncio.run(service.analyze("m")) == "transcript"
+    assert db.get_meeting("m")["status"] == "transcribing" and scheduled
+    # and the analysis phase itself reads the corrected transcript, never Whisper again
+    asyncio.run(service.process("m", prefer_saved_transcript=True, analyze=True))
+    assert db.get_meeting("m")["status"] == "completed"
+    assert analyses == ["Speaker 1: Please fix the logos."]
+
+
+def test_auto_analyze_setting_keeps_the_single_step_flow(monkeypatch, tmp_path):
+    db, service, machine, analyses = _reviewable_service(monkeypatch, tmp_path, auto_analyze=True)
+    async def run():
+        service.enqueue("m")
+        await service._queue.join()
+    asyncio.run(run())
+    assert db.get_meeting("m")["status"] == "completed" and len(analyses) == 1
+
+
+def test_analyze_refuses_without_transcript_or_while_busy(monkeypatch, tmp_path):
+    import pytest
+    db, service, machine, analyses = _reviewable_service(monkeypatch, tmp_path)
+    with pytest.raises(ValueError): asyncio.run(service.analyze("m"))          # nothing transcribed yet
+    db.set_status("m", "transcribing")
+    with pytest.raises(ValueError): asyncio.run(service.analyze("m"))          # still processing
+    with pytest.raises(KeyError): asyncio.run(service.analyze("missing"))

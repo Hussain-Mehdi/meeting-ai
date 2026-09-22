@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     detect_teams_app: bool = True
     max_recording_hours: float = 4.0
     resume_interrupted_processing: bool = True
+    # False: after a recording only the transcript is produced; the user reviews it (edit,
+    # delete lines, name speakers) and presses Analyze. True: analysis follows automatically.
+    auto_analyze: bool = False
     # Whisper/Ollama never start while a recording is being captured, so the
     # capture (the source of truth for the transcript) always gets full priority.
     defer_processing_while_recording: bool = True

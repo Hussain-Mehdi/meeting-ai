@@ -147,6 +147,19 @@ def create_router(db, service):
         try: return service.edit_segment(meeting_id, segment_id, text=body.text, speaker=body.speaker)
         except KeyError as exc: raise HTTPException(404, str(exc))
 
+    @router.delete("/meetings/{meeting_id}/transcript/{segment_id}")
+    def delete_segment(meeting_id: str, segment_id: int):
+        try: return service.delete_segment(meeting_id, segment_id)
+        except KeyError as exc: raise HTTPException(404, str(exc))
+
+    @router.post("/meetings/{meeting_id}/analyze")
+    async def analyze(meeting_id: str):
+        try:
+            source = await service.analyze(meeting_id)
+            return {"status": "processing", "meeting_id": meeting_id, "source": source}
+        except KeyError as exc: raise HTTPException(404, str(exc))
+        except ValueError as exc: raise HTTPException(409, str(exc))
+
     @router.post("/meetings/{meeting_id}/speakers")
     def name_speaker(meeting_id: str, body: SpeakerNameRequest):
         try:

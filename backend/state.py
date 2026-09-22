@@ -11,6 +11,7 @@ class MeetingState(str, Enum):
     RECORDING = "recording"
     RECORDED = "recorded"
     TRANSCRIBING = "transcribing"
+    TRANSCRIBED = "transcribed"
     ANALYZING = "analyzing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -29,7 +30,9 @@ RECORDING_ALLOWED = {
 PROCESSING_ALLOWED = {
     MeetingState.IDLE: {MeetingState.RECORDED, MeetingState.TRANSCRIBING},
     MeetingState.RECORDED: {MeetingState.TRANSCRIBING, MeetingState.FAILED},
-    MeetingState.TRANSCRIBING: {MeetingState.ANALYZING, MeetingState.FAILED},
+    MeetingState.TRANSCRIBING: {MeetingState.TRANSCRIBED, MeetingState.ANALYZING, MeetingState.FAILED},
+    # Transcript is waiting for the user's review; the worker is free for the next meeting.
+    MeetingState.TRANSCRIBED: {MeetingState.IDLE, MeetingState.RECORDED, MeetingState.TRANSCRIBING},
     MeetingState.ANALYZING: {MeetingState.COMPLETED, MeetingState.FAILED},
     MeetingState.COMPLETED: {MeetingState.IDLE, MeetingState.RECORDED, MeetingState.TRANSCRIBING},
     MeetingState.FAILED: {MeetingState.IDLE, MeetingState.RECORDED, MeetingState.TRANSCRIBING},

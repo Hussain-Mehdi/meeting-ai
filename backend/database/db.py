@@ -139,6 +139,10 @@ class Database:
                        (new_text, new_text_en, new_speaker, segment_id))
             return dict(db.execute("SELECT * FROM transcript_segments WHERE id=?", (segment_id,)).fetchone())
 
+    def delete_segment(self, meeting_id: str, segment_id: int) -> bool:
+        with self.connection() as db:
+            return db.execute("DELETE FROM transcript_segments WHERE id=? AND meeting_id=?", (segment_id, meeting_id)).rowcount > 0
+
     def rename_speaker(self, meeting_id: str, old: str, new: str) -> int:
         with self.connection() as db:
             return db.execute("UPDATE transcript_segments SET speaker=?, edited=1 WHERE meeting_id=? AND speaker=?",

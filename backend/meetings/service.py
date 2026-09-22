@@ -77,11 +77,16 @@ class MeetingService:
 
     # ----- background processing queue -----
 
-    def enqueue(self, meeting_id: str, prefer_saved_transcript: bool = False) -> str:
-        """Queue a meeting for processing. Returns 'started' or 'queued'."""
+    def enqueue(self, meeting_id: str, prefer_saved_transcript: bool = False, analyze: bool | None = None) -> str:
+        """Queue a meeting for processing. Returns 'started' or 'queued'.
+
+        analyze=None follows the AUTO_ANALYZE setting; False stops after the transcript so the
+        user can review it; True runs the AI analysis right after the transcript."""
+        if analyze is None:
+            analyze = bool(getattr(self.settings, "auto_analyze", False))
         if self._queue is None:
             self._queue = asyncio.Queue()
-        self._queue.put_nowait((meeting_id, prefer_saved_transcript))
+        self._queue.put_nowait((meeting_id, prefer_saved_transcript, analyze))
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._process_queue())
         if runtime.processing_busy():
@@ -106,13 +111,13 @@ class MeetingService:
 
     async def _process_queue(self):
         while True:
-            meeting_id, prefer_saved_transcript = await self._queue.get()
+            meeting_id, prefer_saved_transcript, analyze = await self._queue.get()
             if meeting_id in self._pending:
                 self._pending.remove(meeting_id)
             runtime.processing_update(queued=list(self._pending))
             try:
                 await self._wait_for_recording_to_finish(meeting_id)
-                await self.process(meeting_id, prefer_saved_transcript=prefer_saved_transcript)
+                await self.process(meeting_id, prefer_saved_transcript=prefer_saved_transcript, analyze=analyze)
             except Exception:
                 log.exception("processing worker failed meeting=%s", meeting_id)
             finally:
@@ -266,6 +271,23 @@ class MeetingService:
         log.info("speaker named meeting=%s speaker_id=%s lines=%s remembered=%s", meeting_id, speaker_id, changed, bool(profile))
         return {"renamed_lines": changed, "name": name, "remembered": bool(profile), "profile": profile}
 
+    async def analyze(self, meeting_id: str) -> str:
+        """The user has reviewed the transcript: run the AI analysis on it as it stands now."""
+        meeting = self.db.get_meeting(meeting_id)
+        if not meeting: raise KeyError("Meeting not found.")
+        if meeting["status"] in ("recording", "recorded", "transcribing", "analyzing"):
+            raise ValueError("This meeting is still being recorded or processed.")
+        if not self.db.transcript(meeting_id):
+            raise ValueError("There is no transcript to analyze. Re-transcribe the recording first.")
+        return await self.retry(meeting_id, retranscribe=False)
+
+    def delete_segment(self, meeting_id: str, segment_id: int) -> dict:
+        meeting = self.db.get_meeting(meeting_id)
+        if not meeting: raise KeyError("Meeting not found.")
+        if not self.db.delete_segment(meeting_id, segment_id): raise KeyError("Transcript line not found.")
+        self._rewrite_transcript_files(meeting)
+        return {"deleted": segment_id, "remaining": len(self.db.transcript(meeting_id))}
+
     def edit_segment(self, meeting_id: str, segment_id: int, text: str | None = None, speaker: str | None = None) -> dict:
         meeting = self.db.get_meeting(meeting_id)
         if not meeting: raise KeyError("Meeting not found.")
@@ -335,7 +357,7 @@ class MeetingService:
                 log.exception("could not write recovery record meeting=%s", meeting_id)
         return message
 
-    async def process(self, meeting_id, prefer_saved_transcript=False):
+    async def process(self, meeting_id, prefer_saved_transcript=False, analyze=True):
         folder = None
         try:
             meeting = self.db.get_meeting(meeting_id)
@@ -363,6 +385,14 @@ class MeetingService:
             if not text:
                 raise RuntimeError("Whisper found no speech in the recording. The recording is safe, but AI analysis was skipped to prevent an invented summary.")
             quality = result.get("quality", {})
+            if not analyze:
+                # Phase one ends here: the transcript waits for the user's corrections.
+                self.db.set_status(meeting_id, "transcribed")
+                runtime.processing_transition(MeetingState.TRANSCRIBED, progress=55,
+                                              stage_detail=f"Transcript ready for review · {len(result['segments'])} lines · quality {quality.get('score', 100)}%")
+                notify("Transcript ready", f"{meeting['title']}: review the transcript, then press Analyze.", True)
+                log.info("transcript ready for review meeting=%s lines=%s", meeting_id, len(result["segments"]))
+                return
             if quality.get("score", 100) < 45:
                 raise RuntimeError("Transcript quality was too low for reliable AI analysis. The transcript and recording were saved, but summarization was skipped to avoid misleading results.")
             runtime.processing_update(progress=55, stage_detail=f"Transcript saved · {len(result['segments'])} segments · quality {quality.get('score', 100)}%")
@@ -410,7 +440,8 @@ class MeetingService:
             raise ValueError("Neither the saved transcript nor the saved recording could be found.")
         source = "recording" if retranscribe or not saved_transcript else "transcript"
         self.db.set_status(meeting_id, "transcribing")
-        outcome = self.enqueue(meeting_id, prefer_saved_transcript=source == "transcript")
+        # Re-transcribing goes back to the review step; analysing a saved transcript is the user's explicit go-ahead.
+        outcome = self.enqueue(meeting_id, prefer_saved_transcript=source == "transcript", analyze=source == "transcript")
         if outcome == "started":
             runtime.processing_update(stage_detail=f"Retrying from saved {source}")
         return source
