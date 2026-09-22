@@ -326,7 +326,7 @@ By default a stopped recording is only transcribed. The meeting then rests in st
 
 ### Evidence playback and corrections
 
-Every task and requested change is mapped back to the transcript line its evidence came from (`evidence_location`), and the detail page plays that span from the saved recording. Transcript lines can be corrected in place (double-click), speakers renamed, and the analysis re-run from the corrected transcript without re-running Whisper.
+Every task and requested change is mapped back to the transcript line its evidence came from (`evidence_location`), and the detail page plays that span from the saved recording. Above the transcript a player plays the whole meeting: scrubber, ±15 s, 0.75x–2x speed, and a *Follow transcript* option that highlights the line being spoken and keeps it in view. Clicking a line's timestamp plays just that line; shift-clicking it plays on from there. All of it streams the saved WAV from `/meetings/{id}/audio` with range requests. Transcript lines can be corrected in place (double-click), speakers renamed, and the analysis re-run from the corrected transcript without re-running Whisper.
 
 Before transcription, ffmpeg `volumedetect` measures the selected saved track. A peak above `-60 dB` is treated as audible. Definite silence stops processing so Whisper and the LLM cannot fabricate a meeting from empty audio.
 
