@@ -1,10 +1,23 @@
 import {useEffect,useMemo,useRef,useState} from 'react';
-import {Home,CalendarDays,CheckSquare,Search,Settings as SettingsIcon,Mic,Square,ChevronRight,ChevronDown,X,Pencil,Plus,Trash2,Download,Play,Pause,Check,UserRound,Copy} from 'lucide-react';
+import {Home,CalendarDays,CheckSquare,Search,Settings as SettingsIcon,Mic,Square,ChevronRight,ChevronDown,X,Pencil,Plus,Trash2,Download,Play,Pause,Check,UserRound,Copy,Sun,Moon,Monitor} from 'lucide-react';
 import {api,apiFile} from './api';
 type Page='home'|'meetings'|'tasks'|'search'|'settings'|'detail'; type Any=Record<string,any>;
 const fmt=(iso?:string)=>iso?new Intl.DateTimeFormat(undefined,{dateStyle:'long',timeStyle:'short'}).format(new Date(iso)):'';
+type Theme='light'|'dark'|'system';
+function useTheme():[Theme,(t:Theme)=>void]{
+ const [theme,setTheme]=useState<Theme>(()=>{try{const saved=localStorage.getItem('theme');return saved==='light'||saved==='dark'?saved:'system'}catch{return 'system'}});
+ useEffect(()=>{const root=document.documentElement;
+  // No attribute means "system": the stylesheet's prefers-color-scheme block decides.
+  if(theme==='system')root.removeAttribute('data-theme');else root.setAttribute('data-theme',theme);
+  try{theme==='system'?localStorage.removeItem('theme'):localStorage.setItem('theme',theme)}catch{}},[theme]);
+ return [theme,setTheme]}
+function ThemeToggle({theme,setTheme}:{theme:Theme;setTheme:(t:Theme)=>void}){
+ const options:[Theme,any,string][]=[['light',Sun,'Light'],['dark',Moon,'Dark'],['system',Monitor,'Match system']];
+ return <div className="theme-toggle" role="group" aria-label="Colour theme">{options.map(([value,Icon,label])=>
+  <button key={value} className={theme===value?'active':''} aria-pressed={theme===value} title={label} onClick={()=>setTheme(value)}><Icon size={14}/></button>)}</div>}
 const PLATFORM_LABEL:Record<string,string>={google_meet:'Google Meet',zoom:'Zoom',teams:'Microsoft Teams'};
 function App(){const [page,setPage]=useState<Page>('home'),[status,setStatus]=useState<Any>({state:'idle'}),[meetings,setMeetings]=useState<Any[]>([]),[tasks,setTasks]=useState<Any[]>([]),[selected,setSelected]=useState<Any>(),[error,setError]=useState(''),[query,setQuery]=useState(''),[templates,setTemplates]=useState<Any[]>([]),[template,setTemplate]=useState('engineering');
+ const [theme,setTheme]=useTheme();
  useEffect(()=>{api<Any[]>('/templates').then(list=>{setTemplates(list);const d=list.find((t:Any)=>t.default);if(d)setTemplate(d.key)}).catch(()=>{})},[]);
  const refresh=()=>{api<Any>('/status').then(setStatus);api<Any[]>('/meetings').then(setMeetings);api<Any[]>('/tasks/me').then(setTasks)};
  useEffect(()=>{refresh();const t=setInterval(refresh,2500);return()=>clearInterval(t)},[]);
@@ -18,7 +31,7 @@ function App(){const [page,setPage]=useState<Page>('home'),[status,setStatus]=us
  const toggle=async(t:Any)=>{await api('/tasks/'+t.id,{method:'PATCH',body:JSON.stringify({status:t.status==='open'?'completed':'open'})});refresh();if(selected)open(selected.id)};
  const proc=status.processing||{state:'idle',progress:0,queued:[]},busy=['recorded','transcribing','analyzing'].includes(proc.state);
  const nav=[['home',Home,'Home'],['meetings',CalendarDays,'Meetings'],['tasks',CheckSquare,'My Tasks'],['search',Search,'Search']];
- return <div className="shell"><aside><div className="brand"><span>MA</span>Meeting AI</div><nav>{nav.map(([p,I,l]:any)=><button className={page===p?'active':''} onClick={()=>setPage(p)}><I size={17}/>{l}</button>)}</nav><button className="settings" onClick={()=>setPage('settings')}><SettingsIcon size={17}/>Settings</button></aside><main>
+ return <div className="shell"><aside><div className="brand"><span>MA</span>Meeting AI</div><nav>{nav.map(([p,I,l]:any)=><button className={page===p?'active':''} onClick={()=>setPage(p)}><I size={17}/>{l}</button>)}</nav><ThemeToggle theme={theme} setTheme={setTheme}/><button className="settings-link" onClick={()=>setPage('settings')}><SettingsIcon size={17}/>Settings</button></aside><main>
   <header><div className={'status '+(status.recording?'recording':proc.state==='failed'||status.state==='failed'?'failed':busy?'transcribing':status.state)}><i/>{status.recording?busy?`Recording · processing previous ${proc.progress}%`:'Recording':busy?`Processing · ${proc.progress}%`:proc.state==='failed'||status.state==='failed'?'Needs attention':status.state==='waiting_for_confirmation'?'Meet detected':'Ready'}</div>{status.recording?<button className="stop" onClick={stop}><Square size={14}/>Stop recording</button>:<><select className="template-picker" aria-label="Meeting type" value={template} onChange={e=>setTemplate(e.target.value)} title={templates.find((t:Any)=>t.key===template)?.description||''}>{templates.map((t:Any)=><option key={t.key} value={t.key}>{t.name}</option>)}</select><button className="primary" onClick={start}><Mic size={15}/>Start recording</button></>}</header>
   {error&&<div className="error"><span>{error}</span><X size={16} onClick={()=>setError('')}/></div>}
   {page==='home'&&<HomePage meetings={meetings} tasks={tasks} open={open} toggle={toggle} status={status}/>} {page==='meetings'&&<MeetingList meetings={meetings} open={open} remove={remove}/>} {page==='tasks'&&<Tasks tasks={tasks} toggle={toggle}/>} {page==='search'&&<SearchPage query={query} setQuery={setQuery} open={open}/>} {page==='settings'&&<Settings/>} {page==='detail'&&selected&&<Detail m={selected} toggle={toggle} retry={retry} analyze={analyze} remove={remove} open={open} onSaved={(updated:Any)=>{setSelected(updated);refresh()}}/>}</main></div>}

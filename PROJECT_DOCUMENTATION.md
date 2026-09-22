@@ -180,6 +180,7 @@ meeting-ai/
 │   ├── src/api.ts                  API wrapper
 │   ├── src/styles.css              Main styling
 │   ├── src/processing.css          Processing display styling
+│   ├── src/theme.css               Light/dark colour tokens (every rule resolves through them)
 │   ├── src/recovery.css            Retry interface styling
 │   ├── package.json                Frontend scripts and packages
 │   └── vite.config.ts              Vite configuration
@@ -279,6 +280,10 @@ Detection only means a Meet page is open. It does not prove that a call is activ
 ### Meeting templates
 
 A template is chosen next to **Start recording** and stored on the meeting. Templates (`backend/analysis/templates.py`) only append guidance to the analyst's system prompt — engineering (default), stand-up, one-on-one, client call, interview, general — so they change emphasis, never the evidence rules.
+
+### Appearance
+
+The sidebar carries a Light / Dark / Match-system toggle. Every colour in the app resolves through the tokens in `frontend/src/theme.css`, so a rule never needs a theme-specific override: light values sit on `:root`, dark values on `:root[data-theme="dark"]` and, for the system setting, under `prefers-color-scheme: dark`. The choice is stored per browser in `localStorage`; "Match system" removes the attribute and follows macOS.
 
 ## 8. Audio capture
 

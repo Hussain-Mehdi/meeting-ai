@@ -1,0 +1,140 @@
+/* Theme tokens. Light is the base; dark applies on an explicit choice and as the
+   system default when the user has not chosen. Every colour in the app resolves
+   through these, so a rule never needs a theme-specific override. */
+:root {
+  color-scheme: light;
+  --bg: #f7f7f5;
+  --bg-sidebar: #f1f1ef;
+  --bg-sidebar-active: #e6e6e2;
+  --surface: #ffffff;
+  --surface-hover: #fafaf8;
+  --surface-subtle: #f1f1ee;
+  --surface-raised: #f5f5f2;
+  --border: #e3e3df;
+  --border-soft: #ebebe8;
+  --border-strong: #d9d9d4;
+  --border-focus: #9b9c96;
+  --text: #20211f;
+  --text-secondary: #5b5d57;
+  --text-muted: #82847d;
+  --text-faint: #989a94;
+  --accent: #282926;
+  --accent-hover: #3a3b37;
+  --on-accent: #ffffff;
+  --success: #3d7448;
+  --success-solid: #3d7448;
+  --on-success: #ffffff;
+  --success-bg: #edf5ee;
+  --success-border: #cfe3d2;
+  --success-dot: #5c9a67;
+  --danger: #b53838;
+  --danger-solid: #b53838;
+  --on-danger: #ffffff;
+  --danger-hover: #9c2f2f;
+  --danger-bg: #fff3f1;
+  --danger-border: #f0d2ce;
+  --danger-text: #7a4a46;
+  --recording: #cc4949;
+  --recording-ring: #cc49491a;
+  --warn-bg: #fbf4dd;
+  --warn-border: #e2c36b;
+  --warn-text: #8a6d1c;
+  --link: #3b5bdb;
+  --focus-ring: #22222211;
+  --shadow: #20211f12;
+  --shadow-soft: #18181408;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121313;
+  --bg-sidebar: #1a1b1b;
+  --bg-sidebar-active: #2a2c2b;
+  --surface: #1c1d1d;
+  --surface-hover: #232424;
+  --surface-subtle: #242525;
+  --surface-raised: #202121;
+  --border: #31322f;
+  --border-soft: #292a28;
+  --border-strong: #3e3f3c;
+  --border-focus: #6d6f69;
+  --text: #eceae5;
+  --text-secondary: #b7b9b2;
+  --text-muted: #93958e;
+  --text-faint: #74766f;
+  --accent: #eceae5;
+  --accent-hover: #ffffff;
+  --on-accent: #16171a;
+  --success: #84c492;
+  --success-solid: #3f7f4e;
+  --on-success: #ffffff;
+  --success-bg: #1a2a1e;
+  --success-border: #2f4a35;
+  --success-dot: #6fae7c;
+  --danger: #f09086;
+  --danger-solid: #b8443c;
+  --on-danger: #ffffff;
+  --danger-hover: #cb4f46;
+  --danger-bg: #2a1917;
+  --danger-border: #4a2b27;
+  --danger-text: #e2aaa4;
+  --recording: #ff6b6b;
+  --recording-ring: #ff6b6b26;
+  --warn-bg: #2b2415;
+  --warn-border: #6b5a2a;
+  --warn-text: #ddc57c;
+  --link: #93a8ff;
+  --focus-ring: #ffffff26;
+  --shadow: #00000066;
+  --shadow-soft: #00000040;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121313;
+    --bg-sidebar: #1a1b1b;
+    --bg-sidebar-active: #2a2c2b;
+    --surface: #1c1d1d;
+    --surface-hover: #232424;
+    --surface-subtle: #242525;
+    --surface-raised: #202121;
+    --border: #31322f;
+    --border-soft: #292a28;
+    --border-strong: #3e3f3c;
+    --border-focus: #6d6f69;
+    --text: #eceae5;
+    --text-secondary: #b7b9b2;
+    --text-muted: #93958e;
+    --text-faint: #74766f;
+    --accent: #eceae5;
+    --accent-hover: #ffffff;
+    --on-accent: #16171a;
+    --success: #84c492;
+    --success-solid: #3f7f4e;
+    --on-success: #ffffff;
+    --success-bg: #1a2a1e;
+    --success-border: #2f4a35;
+    --success-dot: #6fae7c;
+    --danger: #f09086;
+    --danger-solid: #b8443c;
+    --on-danger: #ffffff;
+    --danger-hover: #cb4f46;
+    --danger-bg: #2a1917;
+    --danger-border: #4a2b27;
+    --danger-text: #e2aaa4;
+    --recording: #ff6b6b;
+    --recording-ring: #ff6b6b26;
+    --warn-bg: #2b2415;
+    --warn-border: #6b5a2a;
+    --warn-text: #ddc57c;
+    --link: #93a8ff;
+    --focus-ring: #ffffff26;
+    --shadow: #00000066;
+    --shadow-soft: #00000040;
+  }
+}
+
+html, body { background: var(--bg); color: var(--text); }
+/* Native controls (checkboxes, range) follow the theme too. */
+input, select, textarea, button { accent-color: var(--success-solid); }
