@@ -971,3 +971,45 @@ def test_analyze_refuses_without_transcript_or_while_busy(monkeypatch, tmp_path)
     db.set_status("m", "transcribing")
     with pytest.raises(ValueError): asyncio.run(service.analyze("m"))          # still processing
     with pytest.raises(KeyError): asyncio.run(service.analyze("missing"))
+
+
+def test_whatsapp_provider_detects_only_an_active_call(monkeypatch):
+    import subprocess
+    from backend.detection.meet_detector import DetectionError, WhatsAppProvider
+    import pytest
+    provider = WhatsAppProvider()
+    state = {"running": 0, "window": ""}
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, state["running"], "6589\n" if state["running"] == 0 else "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # WhatsApp not running: no call, and System Events is never asked.
+    state["running"] = 1
+    assert provider.detect(5) is None
+
+    state["running"] = 0
+    import backend.detection.meet_detector as detector_module
+    monkeypatch.setattr(detector_module, "_osascript", lambda script, timeout: state["window"])
+
+    state["window"] = "NONE"                       # WhatsApp open, no call window
+    assert provider.detect(5) is None
+
+    # A real call window, including the bidi mark macOS puts in front of the contact name.
+    state["window"] = "MEET\t‎Sultan - WhatsApp video call"
+    tab = provider.detect(5)
+    assert (tab.platform, tab.url) == ("whatsapp", "whatsapp://call")
+    assert tab.title == "Sultan - WhatsApp video call"      # bidi mark stripped, name kept as the meeting title
+
+    state["window"] = "MEET\tAyesha - WhatsApp call"
+    assert provider.detect(5).title == "Ayesha - WhatsApp call"
+
+    def failing(script, timeout): raise DetectionError("no accessibility permission")
+    monkeypatch.setattr(detector_module, "_osascript", failing)
+    with pytest.raises(DetectionError): provider.detect(5)
+
+
+def test_whatsapp_web_tab_is_not_treated_as_a_meeting():
+    # An open WhatsApp Web tab says nothing about whether a call is running.
+    from backend.detection.meet_detector import BrowserTabProvider
+    assert BrowserTabProvider("Google Chrome").platform_for("https://web.whatsapp.com/") is None

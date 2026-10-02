@@ -223,6 +223,7 @@ Meeting AI reads `.env` through `pydantic-settings`. Unknown environment variabl
 | `DETECTION_BROWSERS` | `Google Chrome` | Chromium-family browsers whose tabs are scanned for Meet, Zoom web, and Teams web |
 | `DETECT_ZOOM_APP` | `true` | Detect a Zoom desktop meeting (the `CptHost` helper only runs during a call) |
 | `DETECT_TEAMS_APP` | `true` | Detect a Teams desktop meeting window (needs Accessibility access; silently skipped otherwise) |
+| `DETECT_WHATSAPP_APP` | `true` | Detect a WhatsApp Desktop call window (needs Accessibility access; silently skipped otherwise) |
 | `WHISPER_TASK` | `translate` | Translate recognized speech to English; use `transcribe` to preserve language |
 | `WHISPER_INITIAL_PROMPT` | technical meeting vocabulary | Helps preserve names and technical terminology |
 | `DATABASE_PATH` | `data/meetings.db` | SQLite location |
@@ -267,7 +268,7 @@ After changing a permission, fully stop and restart Terminal, Codex, VS Code, or
 
 ## 7. Meeting detection and explicit approval
 
-`MeetDetector` polls a list of providers every configured interval: a browser-tab provider per configured Chromium browser (Google Meet, Zoom web, Teams web URLs), a Zoom desktop provider (the `CptHost` process exists only during a call), and a Teams desktop provider (meeting window title via System Events). The first provider that reports a meeting wins; a provider that errors is ignored for that tick. The detected platform is stored on the meeting.
+`MeetDetector` polls a list of providers every configured interval: a browser-tab provider per configured Chromium browser (Google Meet, Zoom web, Teams web URLs), a Zoom desktop provider (the `CptHost` process exists only during a call), a WhatsApp Desktop provider (the "<contact> - WhatsApp video call" window exists only during a call), and a Teams desktop provider (meeting window title via System Events). The first provider that reports a meeting wins; a provider that errors is ignored for that tick. The detected platform is stored on the meeting.
 
 Detection only means a Meet page is open. It does not prove that a call is active. Therefore:
 
@@ -278,6 +279,12 @@ Detection only means a Meet page is open. It does not prove that a call is activ
 - a detection check that fails (Chrome busy, AppleScript error, timeout) is logged and never treated as the meeting ending;
 - a watchdog stops and saves the recording if the audio capture process dies or the `MAX_RECORDING_HOURS` limit is reached;
 - the manual **Stop recording** button remains the dependable fallback.
+
+### WhatsApp and other apps
+
+Audio capture is app-agnostic: ScreenCaptureKit records the whole system output plus the microphone, so a WhatsApp, FaceTime, Slack huddle, or Discord call is captured by **Start recording** without any per-app work. Detection is the only app-specific part, and it only ever raises a notification — recording still waits for explicit approval.
+
+WhatsApp Web is intentionally not detected. Its tab stays open all day and carries no signal about whether a call is running, so it would notify constantly; use Start recording manually for calls there.
 
 ### Meeting templates
 

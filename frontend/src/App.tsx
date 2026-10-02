@@ -18,7 +18,7 @@ function ThemeToggle({theme,setTheme}:{theme:Theme;setTheme:(t:Theme)=>void}){
  const options:[Theme,any,string][]=[['light',Sun,'Light'],['dark',Moon,'Dark'],['system',Monitor,'Match system']];
  return <div className="theme-toggle" role="group" aria-label="Colour theme">{options.map(([value,Icon,label])=>
   <button key={value} className={theme===value?'active':''} aria-pressed={theme===value} title={label} onClick={()=>setTheme(value)}><Icon size={14}/></button>)}</div>}
-const PLATFORM_LABEL:Record<string,string>={google_meet:'Google Meet',zoom:'Zoom',teams:'Microsoft Teams'};
+const PLATFORM_LABEL:Record<string,string>={google_meet:'Google Meet',zoom:'Zoom',teams:'Microsoft Teams',whatsapp:'WhatsApp'};
 function App(){const [page,setPage]=useState<Page>('home'),[status,setStatus]=useState<Any>({state:'idle'}),[meetings,setMeetings]=useState<Any[]>([]),[tasks,setTasks]=useState<Any[]>([]),[selected,setSelected]=useState<Any>(),[error,setError]=useState(''),[query,setQuery]=useState(''),[templates,setTemplates]=useState<Any[]>([]),[template,setTemplate]=useState('engineering');
  const [theme,setTheme]=useTheme();
  useEffect(()=>{api<Any[]>('/templates').then(list=>{setTemplates(list);const d=list.find((t:Any)=>t.default);if(d)setTemplate(d.key)}).catch(()=>{})},[]);

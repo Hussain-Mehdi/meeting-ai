@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     detection_browsers: str = "Google Chrome"
     detect_zoom_app: bool = True
     detect_teams_app: bool = True
+    # WhatsApp Desktop calls (the call window exists only during a call). WhatsApp Web is not
+    # detected: an open tab says nothing about whether a call is running.
+    detect_whatsapp_app: bool = True
     max_recording_hours: float = 4.0
     resume_interrupted_processing: bool = True
     # False: after a recording only the transcript is produced; the user reviews it (edit,

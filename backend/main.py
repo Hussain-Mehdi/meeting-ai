@@ -24,7 +24,8 @@ if recovered_meetings:
     log.warning("marked interrupted meetings as retryable count=%s resumable=%s", recovered_meetings, interrupted_processing)
 service = MeetingService(settings, db)
 detector = MeetDetector(timeout=settings.detection_timeout, end_confirmations=settings.detection_end_confirmations,
-                        browsers=settings.browsers, zoom_app=settings.detect_zoom_app, teams_app=settings.detect_teams_app)
+                        browsers=settings.browsers, zoom_app=settings.detect_zoom_app, teams_app=settings.detect_teams_app,
+                        whatsapp_app=settings.detect_whatsapp_app)
 
 
 async def detected(tab):
@@ -34,7 +35,7 @@ async def detected(tab):
         runtime.transition(MeetingState.DETECTED, meeting_detected=True, detected_title=tab.title, detected_url=tab.url,
                            detected_platform=tab.platform)
         runtime.transition(MeetingState.WAITING_FOR_CONFIRMATION)
-        label = {"google_meet": "Google Meet", "zoom": "Zoom", "teams": "Microsoft Teams"}.get(tab.platform, "Meeting")
+        label = {"google_meet": "Google Meet", "zoom": "Zoom", "teams": "Microsoft Teams", "whatsapp": "WhatsApp"}.get(tab.platform, "Meeting")
         notify(f"{label} detected", "A meeting appears to be open. Open Meeting AI to start recording.", True)
         log.info("meeting detected platform=%s url=%s", tab.platform, tab.url)
 

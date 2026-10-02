@@ -105,6 +105,44 @@ class ZoomAppProvider:
         return None
 
 
+class WhatsAppProvider:
+    """WhatsApp Desktop opens a window named "<contact> - WhatsApp video call" (or "... call")
+    only while a call is in progress; closing the call removes it. The contact name makes a
+    good default meeting title, so the window name is returned as-is apart from bidi marks.
+
+    WhatsApp Web is deliberately not detected: its tab is open all day and says nothing about
+    whether a call is running, so it would notify constantly. Use Start recording manually there.
+    """
+
+    platform = "whatsapp"
+    SCRIPT = '''set d to (ASCII character 9)
+tell application "System Events"
+if not (exists process "WhatsApp") then return "NONE"
+try
+set names to name of windows of process "WhatsApp"
+repeat with n in names
+set s to n as string
+if s contains "WhatsApp" and s contains "call" then return "MEET" & d & s
+end repeat
+end try
+return "NONE"
+end tell'''
+
+    def detect(self, timeout: float) -> MeetTab | None:
+        # System Events is slow and needs Accessibility access; skip it unless WhatsApp runs.
+        try:
+            running = subprocess.run(["pgrep", "-x", "WhatsApp"], capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise DetectionError(f"pgrep failed: {exc}")
+        if running.returncode != 0 or not running.stdout.strip():
+            return None
+        output = _osascript(self.SCRIPT, timeout)
+        if output.startswith("MEET\t"):
+            title = output.split("\t", 1)[1].strip().lstrip("\u200e\u200f\u202a\u202b\u202c\u2066\u2067\u2068\u2069").strip()
+            return MeetTab(title or "WhatsApp call", "whatsapp://call", "whatsapp")
+        return None
+
+
 class TeamsAppProvider:
     """The Teams desktop app opens a separate meeting window whose name starts with the call subject
     and contains "| Microsoft Teams" while a call is active. Needs Accessibility access for System Events;
@@ -147,12 +185,14 @@ class MeetDetector:
     """
 
     def __init__(self, timeout: float = 15.0, end_confirmations: int = 5, providers=None,
-                 browsers=("Google Chrome",), zoom_app: bool = True, teams_app: bool = True):
+                 browsers=("Google Chrome",), zoom_app: bool = True, teams_app: bool = True,
+                 whatsapp_app: bool = True):
         self.timeout = timeout
         self.end_confirmations = max(1, int(end_confirmations))
         if providers is None:
             providers = [BrowserTabProvider(app) for app in browsers]
             if zoom_app: providers.append(ZoomAppProvider())
+            if whatsapp_app: providers.append(WhatsAppProvider())
             if teams_app: providers.append(TeamsAppProvider())
         self.providers = providers
 
