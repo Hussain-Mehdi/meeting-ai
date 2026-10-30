@@ -1,12 +1,11 @@
 /* Adapted from cult-ui's Prompt Composer (MIT, https://www.cult-ui.com) — see NOTICE.md.
  * Upstream renders a WebGL shader avatar via @paper-design/shaders-react and uses Base UI
- * primitives; both are dropped here. What is kept is the composer's shape: one field that
- * grows with the text, a placeholder that cycles through example questions, a loading line
- * across the top edge while the model works, and send chrome that reflects what can be sent.
- * The placeholder is the textarea's own, rather than an overlay, so it can never drift out
- * of alignment with the text it stands in for. */
+ * primitives; both are dropped here, as is its animated loading line: progress belongs in the
+ * conversation, not over the field you are typing in. What is kept is the composer's shape:
+ * one field that grows with the text, a placeholder that cycles through example questions,
+ * and send chrome that reflects what can be sent. The placeholder is the textarea's own,
+ * rather than an overlay, so it can never drift out of alignment with the text. */
 import {useEffect, useRef, useState} from 'react';
-import {motion} from 'motion/react';
 import {ArrowUp, Square} from 'lucide-react';
 import {cn} from '../lib/utils';
 
@@ -52,12 +51,6 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint}: {
     <div className="bui w-full">
       <div className={cn('relative flex flex-col overflow-hidden rounded-[18px] border border-line bg-card',
         disabled && 'opacity-60')}>
-        {busy && (
-          <motion.span aria-hidden className="absolute inset-x-0 top-0 h-px bg-ink-3"
-            initial={{scaleX: 0, transformOrigin: 'left'}}
-            animate={{scaleX: [0, 1, 1], transformOrigin: ['left', 'left', 'right']}}
-            transition={{duration: 1.6, repeat: Infinity, ease: 'easeInOut'}}/>
-        )}
         <textarea
           ref={area} value={value} rows={1} disabled={disabled}
           placeholder={PLACEHOLDERS[placeholder]}

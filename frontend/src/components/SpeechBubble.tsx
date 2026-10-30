@@ -10,11 +10,11 @@ export function SpeechBubble({side = 'left', className, children}: {
 }) {
   const mine = side === 'right';
   return (
-    <div data-slot="speech-bubble" className={cn('relative flex', mine ? 'justify-end pl-10' : 'justify-start pr-10')}>
+    <div data-slot="speech-bubble" className={cn('relative flex min-w-0', mine ? 'justify-end pl-10' : 'justify-start pr-10')}>
       <div
         data-slot="speech-bubble-body"
         className={cn(
-          'relative max-w-[min(42rem,100%)] rounded-[18px] px-4 py-2.5 text-[14px] leading-relaxed',
+          'relative min-w-0 max-w-[min(58rem,100%)] overflow-hidden rounded-[18px] px-4 py-2.5 text-[14px] leading-relaxed break-words',
           mine ? 'bg-accent text-on-accent' : 'border border-line bg-card text-ink',
           className,
         )}>

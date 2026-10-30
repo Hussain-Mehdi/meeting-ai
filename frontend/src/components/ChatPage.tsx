@@ -30,7 +30,7 @@ const clock = (seconds?: number) => {
 function AnswerText({text, sources, onCite}: {text: string; sources: Source[]; onCite: (n: number) => void}) {
   const parts = useMemo(() => text.split(/(\[\d{1,2}\][.,;:!?)]*)/g), [text]);
   return (
-    <div className="whitespace-pre-wrap">
+    <div className="whitespace-pre-wrap break-words">
       {parts.map((part, index) => {
         const match = /^\[(\d{1,2})\]([.,;:!?)]*)$/.exec(part);
         const source = match && sources.find(s => s.n === Number(match[1]));
@@ -65,7 +65,7 @@ function SourceCard({source, open, highlighted}: {source: Source; open: (id: str
           ? <span className="ml-auto inline-flex shrink-0 items-center gap-1"><Clock size={11}/>{clock(source.start)}</span>
           : <span className="ml-auto inline-flex shrink-0 items-center gap-1 capitalize"><FileText size={11}/>{(source.heading || source.kind).replace(/_/g, ' ')}</span>}
       </div>
-      <p className="mt-1.5 line-clamp-3 text-[12px] leading-relaxed text-ink-3">{source.excerpt}</p>
+      <p className="mt-1.5 line-clamp-3 break-words text-[12px] leading-relaxed text-ink-3">{source.excerpt}</p>
     </div>
   );
 }
@@ -195,7 +195,7 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
         </div>
       )}
 
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto pr-1">
+      <div className="mt-5 min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto pr-1">
         {empty ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
             <p className="max-w-md text-[14px] leading-relaxed text-ink-3">
@@ -212,17 +212,17 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
             </div>
           </div>
         ) : (
-          <div className="flex flex-col gap-4">
+          <div className="flex w-full min-w-0 flex-col gap-4">
             {messages.map((message, index) => (
               <motion.div key={message.id || index} initial={{opacity: 0, y: 8}} animate={{opacity: 1, y: 0}}
-                transition={{duration: 0.28, ease: [0.23, 1, 0.32, 1]}} className="flex flex-col gap-2">
+                transition={{duration: 0.28, ease: [0.23, 1, 0.32, 1]}} className="flex w-full min-w-0 flex-col gap-2">
                 <SpeechBubble side={message.role === 'user' ? 'right' : 'left'}>
                   {message.role === 'user'
-                    ? <span className="whitespace-pre-wrap">{message.content}</span>
+                    ? <span className="whitespace-pre-wrap break-words">{message.content}</span>
                     : <AnswerText text={message.content} sources={message.sources || []} onCite={citeJump}/>}
                 </SpeechBubble>
                 {message.role === 'assistant' && !!message.sources?.length && (
-                  <div className="grid gap-2 pr-10 sm:grid-cols-2">
+                  <div className="grid min-w-0 gap-2 pr-10 sm:grid-cols-2 xl:grid-cols-3">
                     {message.sources.map(source => (
                       <SourceCard key={source.n} source={source} open={open} highlighted={highlight === source.n}/>
                     ))}
