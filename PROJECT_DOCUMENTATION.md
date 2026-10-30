@@ -316,11 +316,24 @@ into overlapping 8-line passages that keep speakers and timestamps. It is rebuil
 meeting whenever its transcript or analysis changes, dropped when the meeting is deleted, and
 back-filled at startup for meetings recorded before the feature existed (62 meetings ≈ 0.3 s).
 
-**Retrieval.** The question is reduced to its meaningful words (stopwords dropped, so "what
-should we do about predictions" ranks on *predictions*) and matched with BM25, newest meeting
-first among equal ranks.
+**Which meetings.** A question that names a meeting by time is resolved against meeting dates
+*before* any searching (`backend/chat/scope.py`): "the last meeting", "last time", "the last 3
+meetings", "yesterday", "today", "this/last week", "this/last month", and explicit dates in the
+forms *29 oct*, *October 29*, *29/10*, *2026-10-29* (a date with no year means the most recent
+such date, never a future one). Retrieval is then scoped to those meetings, and each one always
+contributes its own summary, decisions and tasks, so "summarise the last meeting" works even
+when none of its words appear in the question. Keyword search alone cannot do this — "last" and
+"meeting" are words people say constantly inside transcripts, so searching for them returns
+whichever meeting happened to say them.
 
-**Generation.** The top passages are numbered and placed in the system prompt with the same
+**Retrieval.** For unscoped questions, the words are reduced to the meaningful ones (stopwords
+dropped, so "what should we do about predictions" ranks on *predictions*) and matched with BM25,
+newest meeting first among equal ranks.
+
+**Generation.** The prompt always opens with a roster of the most recent meetings (date, title,
+duration) taken straight from the database and marked authoritative, so the model can answer
+"when was the last meeting" and can never invent a date. The top passages are then numbered and
+placed in the system prompt with the same
 evidence rules the analysis pipeline follows: anything presented as having happened in a
 meeting must come from a passage and carry its citation (`[1]`), general knowledge is allowed
 but must be labelled as such and never cited, and a person mentioned in a meeting is still not

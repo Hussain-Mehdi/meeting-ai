@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import StreamingResponse
 from backend.analysis.evidence import attach_evidence_locations
 from backend.analysis.templates import list_templates
-from backend.chat.service import build_context, used_citations
+from backend.chat.service import ROSTER_LIMIT, build_context, build_roster, used_citations
 from backend.audio.devices import AudioDeviceManager
 from backend.config import get_settings
 from backend.reports.pdf import build_meeting_report, content_disposition, report_filename
@@ -242,6 +242,7 @@ def create_router(db, service, chat_service=None):
         history = db.conversation_messages(conversation_id)
         hits = chat_service.retrieve(question, meeting_id=body.meeting_id)
         context, sources = build_context(hits)
+        roster = build_roster(db.recent_meetings(ROSTER_LIMIT))
         db.add_message(conversation_id, "user", question)
 
         def events():
@@ -249,7 +250,7 @@ def create_router(db, service, chat_service=None):
             yield f"event: start\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
             yield f"event: sources\ndata: {json.dumps({'sources': sources})}\n\n"
             try:
-                for chunk in chat_service.stream_answer(question, history, context):
+                for chunk in chat_service.stream_answer(question, history, context, roster):
                     answer.append(chunk)
                     yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
             except Exception as exc:

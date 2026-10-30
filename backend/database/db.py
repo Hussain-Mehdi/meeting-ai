@@ -195,7 +195,50 @@ class Database:
             done += 1 if self.reindex_meeting(meeting_id) else 0
         return done
 
-    def search_index(self, question: str, limit: int = 12, meeting_id: str | None = None) -> list[dict]:
+    def recent_meetings(self, limit: int = 12) -> list[dict]:
+        """Newest meetings with the metadata a question about dates needs."""
+        with self.connection() as db:
+            return [dict(row) for row in db.execute(
+                """SELECT id, title, started_at, ended_at, duration_seconds, status, platform, summary
+                   FROM meetings WHERE status != 'recording' ORDER BY started_at DESC LIMIT ?""", (limit,))]
+
+    def latest_meeting_ids(self, count: int = 1, with_content_only: bool = True) -> list[str]:
+        """Ids of the most recent meetings, skipping ones with nothing recorded in them."""
+        with self.connection() as db:
+            rows = db.execute("""SELECT id FROM meetings WHERE status != 'recording'
+                                 ORDER BY started_at DESC LIMIT 60""").fetchall()
+            ids = []
+            for row in rows:
+                if with_content_only and not db.execute(
+                        "SELECT 1 FROM chat_index WHERE meeting_id=? LIMIT 1", (row["id"],)).fetchone():
+                    continue
+                ids.append(row["id"])
+                if len(ids) >= count:
+                    break
+        return ids
+
+    def meeting_ids_between(self, start: str, end: str) -> list[str]:
+        """Ids of meetings whose start date falls in an inclusive YYYY-MM-DD range."""
+        with self.connection() as db:
+            return [row["id"] for row in db.execute(
+                """SELECT id FROM meetings WHERE status != 'recording'
+                   AND date(started_at) BETWEEN date(?) AND date(?) ORDER BY started_at DESC""", (start, end))]
+
+    def meeting_passages(self, meeting_id: str, limit: int = 10) -> list[dict]:
+        """A meeting's own material, analysis first, for when the question names the meeting
+        rather than describing its content."""
+        order = """CASE c.kind WHEN 'summary' THEN 0 WHEN 'decisions' THEN 1 WHEN 'task' THEN 2
+                               WHEN 'next_steps' THEN 3 WHEN 'key_topics' THEN 4 WHEN 'goals' THEN 5
+                               WHEN 'requested_change' THEN 6 ELSE 9 END"""
+        with self.connection() as db:
+            return [dict(row) for row in db.execute(
+                f"""SELECT c.meeting_id, c.kind, c.ref, c.heading, c.content, c.start, c.end,
+                           m.title, m.started_at
+                    FROM chat_index c JOIN meetings m ON m.id = c.meeting_id
+                    WHERE c.meeting_id = ? ORDER BY {order}, c.start LIMIT ?""", (meeting_id, limit))]
+
+    def search_index(self, question: str, limit: int = 12, meeting_id: str | None = None,
+                     meeting_ids: list[str] | None = None) -> list[dict]:
         """Best-matching passages for a question, newest meeting first among equal ranks."""
         query = build_query(question)
         if not query:
@@ -208,6 +251,9 @@ class Database:
         if meeting_id:
             sql += " AND c.meeting_id = ?"
             args.append(meeting_id)
+        if meeting_ids:
+            sql += f" AND c.meeting_id IN ({','.join('?' * len(meeting_ids))})"
+            args.extend(meeting_ids)
         sql += " ORDER BY rank, m.started_at DESC LIMIT ?"
         args.append(limit)
         with self.connection() as db:

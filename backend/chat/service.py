@@ -12,6 +12,8 @@ from datetime import datetime
 
 import httpx
 
+from backend.chat.scope import detect_scope
+
 log = logging.getLogger(__name__)
 
 MAX_CONTEXT_CHARS = 9_000
@@ -52,6 +54,16 @@ meetings say first, with citations, then the general advice as a separate short 
   section banner, a heading in capitals, or any label copied from these instructions.
 
 ==================================================
+THE MEETINGS THEMSELVES (authoritative)
+==================================================
+
+This list comes straight from the database and is the only correct source for which
+meetings exist, what they are called and when they happened. Never contradict it and never
+invent a meeting or a date that is not on it. "The last meeting" means the first row here.
+
+{roster}
+
+==================================================
 RETRIEVED PASSAGES
 ==================================================
 
@@ -60,6 +72,20 @@ RETRIEVED PASSAGES
 
 NO_CONTEXT_NOTE = """(No meeting passage matched this question. Say that the meetings do not
 appear to cover it, then answer from general knowledge if that is useful, clearly labelled.)"""
+
+ROSTER_LIMIT = 12
+
+
+def build_roster(meetings: list[dict]) -> str:
+    """A compact, factual list of recent meetings: dates a question may refer to."""
+    if not meetings:
+        return "(No meetings have been recorded yet.)"
+    lines = []
+    for index, meeting in enumerate(meetings):
+        minutes = round((meeting.get("duration_seconds") or 0) / 60)
+        label = " (most recent)" if index == 0 else ""
+        lines.append(f"- {_when(meeting.get('started_at'))}{label}: \"{meeting.get('title') or 'Meeting'}\", {minutes} min")
+    return "\n".join(lines)
 
 
 def _when(started_at: str) -> str:
@@ -116,12 +142,51 @@ class ChatService:
         self.client = httpx.Client(timeout=httpx.Timeout(connect=5, read=600, write=30, pool=5))
 
     def retrieve(self, question: str, meeting_id: str | None = None, limit: int = 12) -> list[dict]:
-        return self.db.search_index(question, limit=limit, meeting_id=meeting_id)
+        """Find the passages a question needs.
 
-    def _messages(self, question: str, history: list[dict], context: str) -> list[dict]:
+        A question that names a meeting by time ("the last meeting", "yesterday", "29 Oct")
+        is resolved to actual meetings by date first, and only then searched inside. Keyword
+        search alone cannot do this: "last" and "meeting" are words people say constantly.
+        """
+        if meeting_id:
+            hits = self.db.search_index(question, limit=limit, meeting_id=meeting_id)
+            return hits or self.db.meeting_passages(meeting_id, limit=limit)
+
+        scope = detect_scope(question)
+        scoped_ids: list[str] = []
+        if scope["kind"] == "latest":
+            scoped_ids = self.db.latest_meeting_ids(scope["count"])
+        elif scope["kind"] == "range":
+            scoped_ids = self.db.meeting_ids_between(scope["start"].isoformat(), scope["end"].isoformat())
+
+        if not scoped_ids:
+            return self.db.search_index(question, limit=limit)
+
+        # Inside the chosen meetings, prefer passages that match the question, but always
+        # include each meeting's own material so "summarise it" works without keyword luck.
+        matched = self.db.search_index(question, limit=limit, meeting_ids=scoped_ids)
+        per_meeting = max(3, limit // max(1, len(scoped_ids)))
+        hits: list[dict] = []
+        seen: set[tuple] = set()
+        for scoped_id in scoped_ids:
+            for hit in self.db.meeting_passages(scoped_id, limit=per_meeting):
+                key = (hit["meeting_id"], hit["kind"], hit["ref"])
+                if key not in seen:
+                    seen.add(key)
+                    hits.append(hit)
+        for hit in matched:
+            key = (hit["meeting_id"], hit["kind"], hit["ref"])
+            if key not in seen:
+                seen.add(key)
+                hits.append(hit)
+        log.info("chat scope=%s meetings=%s passages=%s", scope["kind"], len(scoped_ids), len(hits))
+        return hits[:limit]
+
+    def _messages(self, question: str, history: list[dict], context: str, roster: str = "") -> list[dict]:
         system = SYSTEM_PROMPT.format(
             user_name=self.settings.user_name,
             today=datetime.now().strftime("%d %B %Y"),
+            roster=roster or build_roster(getattr(self, "db", None) and self.db.recent_meetings(ROSTER_LIMIT) or []),
             context=context or NO_CONTEXT_NOTE,
         )
         messages = [{"role": "system", "content": system}]
@@ -132,11 +197,11 @@ class ChatService:
         messages.append({"role": "user", "content": question})
         return messages
 
-    def stream_answer(self, question: str, history: list[dict], context: str):
+    def stream_answer(self, question: str, history: list[dict], context: str, roster: str = ""):
         """Yield answer chunks from Ollama as they arrive."""
         payload = {
             "model": self.llm.model,
-            "messages": self._messages(question, history, context),
+            "messages": self._messages(question, history, context, roster),
             "stream": True,
             "think": False,
             "options": {"temperature": 0.2, "num_ctx": self.llm.num_ctx},

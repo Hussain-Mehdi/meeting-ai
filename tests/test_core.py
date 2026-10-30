@@ -1097,7 +1097,8 @@ def test_chat_prompt_states_the_grounding_rules(tmp_path):
     service.settings = type("S", (), {"user_name": "Hussain"})()
     messages = service._messages("what about predictions?", [{"role": "user", "content": "hi"},
                                                              {"role": "assistant", "content": "hello"}],
-                                 "[1] Product sync — 10 Sep 2026 (Jason)\nOnly one prediction at a time.")
+                                 "[1] Product sync — 10 Sep 2026 (Jason)\nOnly one prediction at a time.",
+                                 roster="- 10 Sep 2026 (most recent): \"Product sync\", 40 min")
     system = messages[0]["content"]
     assert "only from the numbered passages" in system
     assert "never attach a citation to it" in system          # general knowledge stays uncited
@@ -1116,7 +1117,8 @@ def test_chat_endpoint_streams_sources_then_tokens_and_saves(tmp_path):
         llm = type("L", (), {"availability": staticmethod(lambda: {"available": True, "model_installed": True, "message": ""})})()
         def retrieve(self, question, meeting_id=None, limit=12): return db.search_index(question, limit=limit)
         def title_for(self, question): return question[:60]
-        def stream_answer(self, question, history, context):
+        def stream_answer(self, question, history, context, roster=""):
+            assert "most recent" in roster or roster == ""     # the roster reaches generation
             yield "Only one prediction at a time "
             yield "[1]."
 
@@ -1150,3 +1152,93 @@ def test_chat_endpoint_reports_when_ollama_is_down(tmp_path):
     app = FastAPI(); app.include_router(create_router(db, object(), DownChat()))
     response = TestClient(app).post("/api/chat", json={"message": "hello"})
     assert response.status_code == 503 and "Ollama" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- chat: which meeting is being asked about
+
+
+def test_scope_detects_time_references():
+    from backend.chat.scope import detect_scope
+    from datetime import date
+    today = date(2026, 10, 30)               # a Friday
+    assert detect_scope("what is the summary of the last meeting?", today) == {"kind": "latest", "count": 1}
+    assert detect_scope("what did we discuss last time", today) == {"kind": "latest", "count": 1}
+    assert detect_scope("summarise the last 3 meetings", today) == {"kind": "latest", "count": 3}
+    assert detect_scope("what happened on 29 oct", today) == {"kind": "range", "start": date(2026, 10, 29), "end": date(2026, 10, 29)}
+    assert detect_scope("the meeting on October 29", today)["start"] == date(2026, 10, 29)
+    assert detect_scope("anything from 29/10?", today)["start"] == date(2026, 10, 29)
+    assert detect_scope("the 2026-09-10 meeting", today)["start"] == date(2026, 9, 10)
+    assert detect_scope("meetings yesterday", today) == {"kind": "range", "start": date(2026, 10, 29), "end": date(2026, 10, 29)}
+    # "last week" is a range and must win over the "last <meeting>" rule
+    assert detect_scope("what did we agree last week", today) == {"kind": "range", "start": date(2026, 10, 19), "end": date(2026, 10, 25)}
+    assert detect_scope("what did we do this month", today)["start"] == date(2026, 10, 1)
+    # a date with no year means the most recent such date, never the future
+    assert detect_scope("what about 25 december", today)["start"] == date(2025, 12, 25)
+    # content questions stay unscoped
+    assert detect_scope("what should I do with predictions?", today) == {"kind": "none"}
+    assert detect_scope("", today) == {"kind": "none"}
+
+
+def test_last_meeting_question_retrieves_the_newest_meeting(tmp_path):
+    """The bug this fixes: "the last meeting" used to be a keyword search for the words
+    "last" and "meeting", which matched whichever transcript happened to say them."""
+    from backend.chat.service import ChatService
+    db = Database(tmp_path / "scope.db")
+    for index, (meeting_id, when, title) in enumerate([
+        ("old", "2026-10-01T10:00:00+05:00", "Old meeting"),
+        ("new", "2026-10-29T17:00:00+05:00", "Newest meeting"),
+    ]):
+        folder = tmp_path / meeting_id; folder.mkdir()
+        db.create_meeting(meeting_id, title, when, folder / "recording.wav")
+        db.finish_recording(meeting_id, when, 600)
+        text = ("In the last meeting we said the word meeting many times." if meeting_id == "old"
+                else "We moved the tournament screen to the new API.")
+        db.save_transcript(meeting_id, [{"start": 0, "end": 5, "speaker": "Hussain", "text": text}],
+                           folder / "transcript.json")
+    service = ChatService.__new__(ChatService); service.db = db
+
+    # The decoy says "last meeting" repeatedly; the answer must still come from the newest one.
+    hits = service.retrieve("what is the summary of the last meeting?")
+    assert hits and {h["meeting_id"] for h in hits} == {"new"}
+
+    assert {h["meeting_id"] for h in service.retrieve("what happened on 1 october 2026?")} == {"old"}
+    # an unscoped content question still searches everywhere
+    assert {h["meeting_id"] for h in service.retrieve("tournament screen")} == {"new"}
+
+
+def test_scoped_meeting_returns_its_material_even_without_keyword_matches(tmp_path):
+    from backend.chat.service import ChatService
+    db = Database(tmp_path / "scope2.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    db.create_meeting("m", "Planning", "2026-10-29T17:00:00+05:00", folder / "recording.wav")
+    db.finish_recording("m", "2026-10-29T18:00:00+05:00", 3600)
+    db.save_transcript("m", [{"start": 0, "end": 5, "speaker": "Hussain", "text": "Ship the overlay on Friday."}],
+                       folder / "transcript.json")
+    service = ChatService.__new__(ChatService); service.db = db
+    # None of these words appear in the meeting, but it is still the meeting being asked about.
+    hits = service.retrieve("give me a quick recap of the last meeting")
+    assert hits and all(h["meeting_id"] == "m" for h in hits)
+    assert "overlay" in " ".join(h["content"] for h in hits)
+
+
+def test_roster_lists_meetings_with_the_newest_marked():
+    from backend.chat.service import build_roster
+    roster = build_roster([
+        {"title": "Google Meet", "started_at": "2026-10-29T17:03:00+05:00", "duration_seconds": 2580},
+        {"title": "Meet", "started_at": "2026-10-26T17:24:00+05:00", "duration_seconds": 660},
+    ])
+    assert "29 Oct 2026 (most recent): \"Google Meet\", 43 min" in roster
+    assert "26 Oct 2026: \"Meet\", 11 min" in roster
+    assert "(most recent)" not in roster.splitlines()[1]
+    assert build_roster([]) == "(No meetings have been recorded yet.)"
+
+
+def test_prompt_carries_the_roster_as_authoritative(tmp_path):
+    from backend.chat.service import ChatService
+    service = ChatService.__new__(ChatService)
+    service.settings = type("S", (), {"user_name": "Hussain"})()
+    system = service._messages("what was the last meeting?", [], "", roster="- 29 Oct 2026 (most recent): \"Google Meet\", 43 min")[0]["content"]
+    flat = " ".join(system.split())          # the prompt wraps; compare on normalised whitespace
+    assert "29 Oct 2026 (most recent)" in flat
+    assert "never invent a meeting or a date that is not on it" in flat
+    assert '"The last meeting" means the first row here' in flat
