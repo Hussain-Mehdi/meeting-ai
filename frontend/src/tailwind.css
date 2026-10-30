@@ -32,6 +32,15 @@
   --color-on-accent: var(--on-accent);
   --color-surface: var(--surface);
   --color-inset: var(--surface-hover);
+  /* shadcn/cult-ui semantic names, so components written against them theme with the app. */
+  --color-foreground: var(--text);
+  --color-background: var(--bg);
+  --color-muted: var(--surface-subtle);
+  --color-muted-foreground: var(--text-muted);
+  --color-border: var(--border);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--on-accent);
+  --color-ring: var(--border-focus);
   --radius-card: 12px;
   --shadow-card: 0 1px 2px var(--shadow-soft);
 }
@@ -44,6 +53,8 @@
    leaves every hand-written rule in the rest of the app untouched. */
 @layer base {
   .bui button, .bui [role="checkbox"] { background: transparent; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
+  .bui textarea, .bui input, .bui select { background: transparent; border: 0; margin: 0; font: inherit; color: inherit; outline: none; }
+  .bui textarea { resize: none; }
   .bui button:disabled { cursor: not-allowed; }
   .bui, .bui * { box-sizing: border-box; }
   .bui p, .bui h2, .bui h3 { margin: 0; }

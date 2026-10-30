@@ -1,10 +1,15 @@
 import json
+import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from backend.analysis.schemas import MeetingAnalysis
+from backend.chat.index import SCHEMA as CHAT_INDEX_SCHEMA, build_query, meeting_rows
+
+
+log = logging.getLogger(__name__)
 
 
 SCHEMA = """
@@ -43,6 +48,14 @@ CREATE TABLE IF NOT EXISTS voice_profiles (
  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, embedding TEXT NOT NULL, samples INTEGER DEFAULT 1,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chat_conversations (
+ id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+ id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+ sources TEXT, created_at TEXT NOT NULL,
+ FOREIGN KEY(conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS meeting_info_edits (
  meeting_id TEXT PRIMARY KEY, title TEXT NOT NULL, people_json TEXT NOT NULL,
  updated_at TEXT NOT NULL, FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
@@ -56,6 +69,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript(SCHEMA)
+            db.executescript(CHAT_INDEX_SCHEMA)
             self._migrate(db)
 
     @staticmethod
@@ -123,6 +137,7 @@ class Database:
                              s.get("avg_logprob"), s.get("no_speech_prob"), s.get("speaker_id"), s.get("track"),
                              1 if s.get("edited") else 0) for s in segments])
             db.execute("UPDATE meetings SET transcript_path=? WHERE id=?", (str(transcript_path), meeting_id))
+        self.reindex_meeting(meeting_id)
 
     def update_segment(self, meeting_id: str, segment_id: int, text: str | None = None, speaker: str | None = None) -> dict | None:
         """Correct one transcript line. Only the fields supplied change; the row is marked as edited."""
@@ -152,6 +167,98 @@ class Database:
         with self.connection() as db:
             return db.execute("UPDATE transcript_segments SET speaker=? WHERE meeting_id=? AND speaker_id=?",
                               (new.strip(), meeting_id, speaker_id)).rowcount
+
+    # ----- chat retrieval index -----
+
+    def reindex_meeting(self, meeting_id: str) -> int:
+        """Rebuild one meeting's searchable passages. Safe to call after any change to it."""
+        meeting = self.get_meeting(meeting_id)
+        with self.connection() as db:
+            db.execute("DELETE FROM chat_index WHERE meeting_id=?", (meeting_id,))
+            if not meeting:
+                return 0
+            rows = meeting_rows(meeting, self.transcript(meeting_id))
+            db.executemany(
+                "INSERT INTO chat_index(meeting_id,kind,ref,heading,content,start,end) VALUES(?,?,?,?,?,?,?)",
+                [(meeting_id, r["kind"], r["ref"], r["heading"], r["content"], r["start"], r["end"]) for r in rows])
+        return len(rows)
+
+    def reindex_all(self, only_missing: bool = True) -> int:
+        """Backfill the index for meetings recorded before it existed."""
+        with self.connection() as db:
+            indexed = {row[0] for row in db.execute("SELECT DISTINCT meeting_id FROM chat_index")} if only_missing else set()
+            ids = [row["id"] for row in db.execute("SELECT id FROM meetings ORDER BY started_at")]
+        done = 0
+        for meeting_id in ids:
+            if only_missing and meeting_id in indexed:
+                continue
+            done += 1 if self.reindex_meeting(meeting_id) else 0
+        return done
+
+    def search_index(self, question: str, limit: int = 12, meeting_id: str | None = None) -> list[dict]:
+        """Best-matching passages for a question, newest meeting first among equal ranks."""
+        query = build_query(question)
+        if not query:
+            return []
+        sql = """SELECT c.meeting_id, c.kind, c.ref, c.heading, c.content, c.start, c.end,
+                        m.title, m.started_at, bm25(chat_index) AS rank
+                 FROM chat_index c JOIN meetings m ON m.id = c.meeting_id
+                 WHERE chat_index MATCH ?"""
+        args: list = [query]
+        if meeting_id:
+            sql += " AND c.meeting_id = ?"
+            args.append(meeting_id)
+        sql += " ORDER BY rank, m.started_at DESC LIMIT ?"
+        args.append(limit)
+        with self.connection() as db:
+            try:
+                return [dict(row) for row in db.execute(sql, args)]
+            except sqlite3.OperationalError:
+                # A query the tokenizer rejects must not take the chat down.
+                log.warning("chat index rejected a query (%s characters)", len(question or ""))
+                return []
+
+    # ----- chat conversations -----
+
+    def create_conversation(self, title: str) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        conversation_id = uuid.uuid4().hex[:12]
+        with self.connection() as db:
+            db.execute("INSERT INTO chat_conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)",
+                       (conversation_id, title[:120] or "New chat", now, now))
+        return {"id": conversation_id, "title": title[:120] or "New chat", "created_at": now, "updated_at": now}
+
+    def list_conversations(self, limit: int = 50) -> list[dict]:
+        with self.connection() as db:
+            return [dict(row) for row in db.execute(
+                """SELECT c.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id=c.id) AS messages
+                   FROM chat_conversations c ORDER BY c.updated_at DESC LIMIT ?""", (limit,))]
+
+    def conversation_messages(self, conversation_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM chat_messages WHERE conversation_id=? ORDER BY created_at, rowid",
+                              (conversation_id,)).fetchall()
+        return [{**dict(row), "sources": json.loads(row["sources"]) if row["sources"] else []} for row in rows]
+
+    def add_message(self, conversation_id: str, role: str, content: str, sources: list | None = None) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        message_id = uuid.uuid4().hex[:12]
+        with self.connection() as db:
+            db.execute("INSERT INTO chat_messages(id,conversation_id,role,content,sources,created_at) VALUES(?,?,?,?,?,?)",
+                       (message_id, conversation_id, role, content, json.dumps(sources or []), now))
+            db.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+        return {"id": message_id, "conversation_id": conversation_id, "role": role, "content": content,
+                "sources": sources or [], "created_at": now}
+
+    def rename_conversation(self, conversation_id: str, title: str) -> bool:
+        with self.connection() as db:
+            return db.execute("UPDATE chat_conversations SET title=? WHERE id=?",
+                              (title[:120], conversation_id)).rowcount > 0
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self.connection() as db:
+            db.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
+            return db.execute("DELETE FROM chat_conversations WHERE id=?", (conversation_id,)).rowcount > 0
 
     # ----- voice profiles for one-time speaker naming -----
 
@@ -211,6 +318,13 @@ class Database:
             for table, values in (("decisions", analysis.decisions), ("goals", analysis.goals), ("key_topics", analysis.key_topics),
                                   ("next_steps", analysis.next_steps)):
                 db.executemany(f"INSERT INTO {table} VALUES(?,?,?)", [(uuid.uuid4().hex, meeting_id, x) for x in values])
+        self._reindex_after_analysis(meeting_id)
+
+    def _reindex_after_analysis(self, meeting_id: str) -> None:
+        try:
+            self.reindex_meeting(meeting_id)
+        except Exception:
+            log.exception("chat index could not be refreshed meeting=%s", meeting_id)
 
     def clear_analysis(self, meeting_id: str):
         """Remove derived claims while preserving the meeting, recording, and transcript."""
@@ -218,6 +332,7 @@ class Database:
             for table in ("people", "tasks", "requested_changes", "decisions", "goals", "key_topics", "next_steps"):
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             db.execute("UPDATE meetings SET summary='', analysis_path=NULL WHERE id=?", (meeting_id,))
+        self._reindex_after_analysis(meeting_id)
 
     def delete_meeting(self, meeting_id: str) -> bool:
         """Remove a meeting and every derived row. Connections do not enable foreign keys, so delete explicitly."""
@@ -228,6 +343,7 @@ class Database:
                           "key_topics", "next_steps", "meeting_info_edits"):
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
+            db.execute("DELETE FROM chat_index WHERE meeting_id=?", (meeting_id,))
         return True
 
     def list_meetings(self, query=None):

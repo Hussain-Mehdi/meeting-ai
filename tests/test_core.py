@@ -1013,3 +1013,140 @@ def test_whatsapp_web_tab_is_not_treated_as_a_meeting():
     # An open WhatsApp Web tab says nothing about whether a call is running.
     from backend.detection.meet_detector import BrowserTabProvider
     assert BrowserTabProvider("Google Chrome").platform_for("https://web.whatsapp.com/") is None
+
+
+# ---------------------------------------------------------------- chat: retrieval and grounding
+
+
+def _chat_db(tmp_path):
+    db = Database(tmp_path / "chat.db")
+    folder = tmp_path / "m1"; folder.mkdir()
+    db.create_meeting("m1", "Product sync", "2026-09-10T17:00:00+05:00", folder / "recording.wav")
+    db.finish_recording("m1", "2026-09-10T17:40:00+05:00", 2400)
+    segments = [
+        {"start": 0, "end": 6, "speaker": "Jason", "text": "We should only show one prediction at a time."},
+        {"start": 6, "end": 12, "speaker": "Hussain", "text": "Agreed, and it fades away if nobody taps it."},
+        {"start": 12, "end": 18, "speaker": "Jason", "text": "Also fix the scoreboard logos from the Figma."},
+    ]
+    db.save_transcript("m1", segments, folder / "transcript.json")
+    return db
+
+
+def test_chat_query_drops_stopwords_and_keeps_subject():
+    from backend.chat.index import build_query
+    assert build_query("what to do with predictions") == '"predictions"*'
+    assert '"scoreboard"*' in build_query("What did Jason say about the scoreboard?")
+    assert '"jason"*' in build_query("What did Jason say about the scoreboard?")
+    assert build_query("???") == ""           # nothing searchable
+    assert build_query("") == ""
+
+
+def test_chat_index_finds_transcript_and_analysis(tmp_path):
+    db = _chat_db(tmp_path)
+    hits = db.search_index("predictions")
+    assert hits and hits[0]["meeting_id"] == "m1"
+    assert "prediction" in hits[0]["content"].lower()
+    assert hits[0]["title"] == "Product sync"          # joined meeting metadata travels with the hit
+
+    db.save_analysis("m1", _analysis(), tmp_path / "analysis.json")
+    kinds = {h["kind"] for h in db.search_index("logos", limit=20)}
+    assert "task" in kinds or "transcript" in kinds
+    assert db.search_index("nothingmatchesthisword") == []
+
+
+def test_chat_index_follows_transcript_edits_and_deletion(tmp_path):
+    db = _chat_db(tmp_path)
+    assert db.search_index("Figma")
+    segment_id = [s for s in db.transcript("m1") if "Figma" in s["text"]][0]["id"]
+    db.delete_segment("m1", segment_id)
+    db.reindex_meeting("m1")
+    assert not [h for h in db.search_index("Figma") if h["kind"] == "transcript"]
+    db.delete_meeting("m1")
+    assert db.search_index("predictions") == []
+
+
+def test_chat_context_is_numbered_and_citations_are_filtered():
+    from backend.chat.service import build_context, used_citations
+    hits = [
+        {"meeting_id": "m1", "kind": "transcript", "heading": "Jason", "content": "Only one prediction at a time.",
+         "start": 65, "end": 70, "title": "Product sync", "started_at": "2026-09-10T17:00:00+05:00"},
+        {"meeting_id": "m2", "kind": "decision", "heading": "Decision", "content": "Ship on Friday.",
+         "start": 0, "end": 0, "title": "Release call", "started_at": "2026-09-12T10:00:00+05:00"},
+    ]
+    context, sources = build_context(hits)
+    assert "[1] Product sync — 10 Sep 2026 at 1:05 (Jason)" in context
+    assert "[2] Release call — 12 Sep 2026 (Decision)" in context
+    assert [s["n"] for s in sources] == [1, 2]
+    # only what the answer actually cited is handed back to the UI
+    assert [s["n"] for s in used_citations("We agreed to show one at a time [1].", sources)] == [1]
+    assert used_citations("Generally, predictions work best when timely.", sources) == []
+
+
+def test_chat_context_respects_the_budget():
+    from backend.chat.service import build_context, MAX_CONTEXT_CHARS
+    hits = [{"meeting_id": f"m{i}", "kind": "transcript", "heading": "X", "content": "word " * 1200,
+             "start": 0, "end": 0, "title": "Long meeting", "started_at": "2026-09-10T17:00:00+05:00"}
+            for i in range(8)]
+    context, sources = build_context(hits)
+    assert len(context) <= MAX_CONTEXT_CHARS and 0 < len(sources) < 8
+
+
+def test_chat_prompt_states_the_grounding_rules(tmp_path):
+    from backend.chat.service import ChatService
+    service = ChatService.__new__(ChatService)
+    service.settings = type("S", (), {"user_name": "Hussain"})()
+    messages = service._messages("what about predictions?", [{"role": "user", "content": "hi"},
+                                                             {"role": "assistant", "content": "hello"}],
+                                 "[1] Product sync — 10 Sep 2026 (Jason)\nOnly one prediction at a time.")
+    system = messages[0]["content"]
+    assert "only from the numbered passages" in system
+    assert "never attach a citation to it" in system          # general knowledge stays uncited
+    assert "not necessarily an attendee" in system            # the project's own rule survives
+    assert "Only one prediction at a time." in system
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[-1]["content"] == "what about predictions?"
+
+
+def test_chat_endpoint_streams_sources_then_tokens_and_saves(tmp_path):
+    from fastapi import FastAPI
+    from backend.api.routes import create_router
+    db = _chat_db(tmp_path)
+
+    class FakeChat:
+        llm = type("L", (), {"availability": staticmethod(lambda: {"available": True, "model_installed": True, "message": ""})})()
+        def retrieve(self, question, meeting_id=None, limit=12): return db.search_index(question, limit=limit)
+        def title_for(self, question): return question[:60]
+        def stream_answer(self, question, history, context):
+            yield "Only one prediction at a time "
+            yield "[1]."
+
+    app = FastAPI(); app.include_router(create_router(db, object(), FakeChat()))
+    client = TestClient(app)
+    with client.stream("POST", "/api/chat", json={"message": "what about predictions?"}) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        body = "".join(response.iter_text())
+    assert "event: sources" in body and "event: token" in body and "event: done" in body
+    conversation = db.list_conversations()[0]
+    messages = db.conversation_messages(conversation["id"])
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == "Only one prediction at a time [1]."
+    assert [s["n"] for s in messages[1]["sources"]] == [1]     # the cited source was persisted
+
+    assert client.get("/api/chat/conversations").json()[0]["messages"] == 2
+    assert client.get("/api/chat/conversations/missing").status_code == 404
+    assert client.delete(f"/api/chat/conversations/{conversation['id']}").status_code == 200
+    assert client.get("/api/chat/conversations").json() == []
+
+
+def test_chat_endpoint_reports_when_ollama_is_down(tmp_path):
+    from fastapi import FastAPI
+    from backend.api.routes import create_router
+    db = _chat_db(tmp_path)
+
+    class DownChat:
+        llm = type("L", (), {"availability": staticmethod(lambda: {"available": False, "model_installed": False,
+                                                                   "message": "Ollama is not running."})})()
+    app = FastAPI(); app.include_router(create_router(db, object(), DownChat()))
+    response = TestClient(app).post("/api/chat", json={"message": "hello"})
+    assert response.status_code == 503 and "Ollama" in response.json()["detail"]

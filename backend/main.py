@@ -8,6 +8,7 @@ from backend.api.routes import create_router
 from backend.config import get_settings
 from backend.database.db import Database
 from backend.detection.meet_detector import MeetDetector
+from backend.chat.service import ChatService
 from backend.meetings.service import MeetingService
 from backend.notifications.macos import notify
 from backend.state import MeetingState, runtime
@@ -23,6 +24,7 @@ recovered_meetings = db.recover_interrupted_meetings()
 if recovered_meetings:
     log.warning("marked interrupted meetings as retryable count=%s resumable=%s", recovered_meetings, interrupted_processing)
 service = MeetingService(settings, db)
+chat_service = ChatService(db, service.llm, settings)
 detector = MeetDetector(timeout=settings.detection_timeout, end_confirmations=settings.detection_end_confirmations,
                         browsers=settings.browsers, zoom_app=settings.detect_zoom_app, teams_app=settings.detect_teams_app,
                         whatsapp_app=settings.detect_whatsapp_app)
@@ -53,6 +55,8 @@ async def ended(tab):
 @asynccontextmanager
 async def lifespan(app):
     log.info("Meeting AI startup")
+    indexed = await asyncio.to_thread(db.reindex_all)
+    if indexed: log.info("chat index backfilled meetings=%s", indexed)
     tasks = [asyncio.create_task(detector.monitor(detected, ended, settings.detection_interval)),
              asyncio.create_task(service.watchdog())]
     if interrupted_processing and settings.resume_interrupted_processing:
@@ -63,4 +67,4 @@ async def lifespan(app):
 
 app = FastAPI(title="Meeting AI", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_methods=["*"], allow_headers=["*"])
-app.include_router(create_router(db, service))
+app.include_router(create_router(db, service, chat_service))

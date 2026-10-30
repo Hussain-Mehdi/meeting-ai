@@ -1,5 +1,22 @@
 # Third-party UI components
 
+## cult-ui
+
+`PromptComposer.tsx` and `SpeechBubble.tsx` are adapted from **cult-ui**
+(https://www.cult-ui.com), MIT licensed. Changes made here:
+
+- The Prompt Composer drops its WebGL shader avatar (`@paper-design/shaders-react`) and its
+  Base UI primitives, and uses the textarea's own placeholder instead of an overlay, so the
+  placeholder cannot drift out of alignment with the text. Its shape, cycling placeholder,
+  loading line and send chrome are kept.
+- The Speech Bubble becomes a chat bubble with a side instead of a single marketing bubble.
+- Both resolve their colours through this app's light/dark tokens.
+
+`motion`, `clsx` and `tailwind-merge` were added for these; `@base-ui/react` and
+`@paper-design/shaders-react` deliberately were not.
+
+
+
 `TaskRows.tsx`, `LoadingState.tsx`, and `RecordsTable.tsx` are adapted from
 **Beautiful UI** (https://www.beautifului.dev), MIT licensed:
 

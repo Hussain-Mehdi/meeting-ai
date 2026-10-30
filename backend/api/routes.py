@@ -5,8 +5,10 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import StreamingResponse
 from backend.analysis.evidence import attach_evidence_locations
 from backend.analysis.templates import list_templates
+from backend.chat.service import build_context, used_citations
 from backend.audio.devices import AudioDeviceManager
 from backend.config import get_settings
 from backend.reports.pdf import build_meeting_report, content_disposition, report_filename
@@ -22,6 +24,16 @@ class StartRequest(BaseModel):
     meet_url: str | None = None
     template: str | None = None
     platform: str | None = None
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = None
+    meeting_id: str | None = None
+
+
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 class SpeakerNameRequest(BaseModel):
@@ -69,7 +81,7 @@ class MeetingInfoUpdate(BaseModel):
         return value.strip()
 
 
-def create_router(db, service):
+def create_router(db, service, chat_service=None):
     router = APIRouter(prefix="/api")
     settings = get_settings()
     user_aliases = {alias.casefold() for alias in settings.aliases}
@@ -189,6 +201,70 @@ def create_router(db, service):
     def delete_voice(name: str):
         if not db.delete_voice_profile(name): raise HTTPException(404, "Voice profile not found")
         return {"deleted": name}
+
+    # ----- chat -----
+
+    @router.get("/chat/conversations")
+    def conversations(): return db.list_conversations()
+
+    @router.get("/chat/conversations/{conversation_id}")
+    def conversation(conversation_id: str):
+        messages = db.conversation_messages(conversation_id)
+        if not messages and not any(c["id"] == conversation_id for c in db.list_conversations()):
+            raise HTTPException(404, "Conversation not found")
+        return {"id": conversation_id, "messages": messages}
+
+    @router.patch("/chat/conversations/{conversation_id}")
+    def rename_conversation(conversation_id: str, body: ConversationRename):
+        if not db.rename_conversation(conversation_id, body.title): raise HTTPException(404, "Conversation not found")
+        return {"id": conversation_id, "title": body.title}
+
+    @router.delete("/chat/conversations/{conversation_id}")
+    def delete_conversation(conversation_id: str):
+        if not db.delete_conversation(conversation_id): raise HTTPException(404, "Conversation not found")
+        return {"deleted": conversation_id}
+
+    @router.post("/chat")
+    def chat(body: ChatRequest):
+        """Answer a question about the meetings, streaming the reply as it is generated.
+
+        Server-sent events: `sources` once up front, then `token` chunks, then `done`.
+        """
+        status = chat_service.llm.availability()
+        if not status["available"] or not status["model_installed"]:
+            raise HTTPException(503, status["message"] or "Ollama is unavailable.")
+        question = body.message.strip()
+        conversation_id = body.conversation_id
+        if conversation_id and not any(c["id"] == conversation_id for c in db.list_conversations()):
+            raise HTTPException(404, "Conversation not found")
+        if not conversation_id:
+            conversation_id = db.create_conversation(chat_service.title_for(question))["id"]
+        history = db.conversation_messages(conversation_id)
+        hits = chat_service.retrieve(question, meeting_id=body.meeting_id)
+        context, sources = build_context(hits)
+        db.add_message(conversation_id, "user", question)
+
+        def events():
+            answer = []
+            yield f"event: start\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
+            yield f"event: sources\ndata: {json.dumps({'sources': sources})}\n\n"
+            try:
+                for chunk in chat_service.stream_answer(question, history, context):
+                    answer.append(chunk)
+                    yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
+            except Exception as exc:
+                log.exception("chat generation failed conversation=%s", conversation_id)
+                message = f"The local model could not answer: {exc}"
+                db.add_message(conversation_id, "assistant", message, [])
+                yield f"event: error\ndata: {json.dumps({'message': message})}\n\n"
+                return
+            text = "".join(answer).strip()
+            cited = used_citations(text, sources)
+            db.add_message(conversation_id, "assistant", text, cited)
+            yield f"event: done\ndata: {json.dumps({'conversation_id': conversation_id, 'sources': cited})}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     @router.get("/templates")
     def templates(): return list_templates()

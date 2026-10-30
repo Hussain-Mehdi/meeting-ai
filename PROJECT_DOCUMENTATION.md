@@ -182,7 +182,8 @@ meeting-ai/
 │   ├── src/processing.css          Processing display styling
 │   ├── src/theme.css               Light/dark colour tokens (every rule resolves through them)
 │   ├── src/tailwind.css            Tailwind (theme + utilities layers only, no preflight)
-│   ├── src/components/             Components adapted from Beautiful UI (MIT) — see NOTICE.md
+│   ├── src/components/             Components adapted from Beautiful UI and cult-ui (MIT) — see NOTICE.md
+│   ├── src/components/ChatPage.tsx Ask AI: streamed answers, citations, source cards
 │   ├── src/recovery.css            Retry interface styling
 │   ├── package.json                Frontend scripts and packages
 │   └── vite.config.ts              Vite configuration
@@ -302,6 +303,38 @@ They need Tailwind, which the rest of the app does not use. Two decisions keep t
 ### Appearance
 
 The sidebar carries a Light / Dark / Match-system toggle. Every colour in the app resolves through the tokens in `frontend/src/theme.css`, so a rule never needs a theme-specific override: light values sit on `:root`, dark values on `:root[data-theme="dark"]` and, for the system setting, under `prefers-color-scheme: dark`. The choice is stored per browser in `localStorage`; "Match system" removes the attribute and follows macOS.
+
+## 7b. Ask AI
+
+A question goes through retrieval before it reaches the model, so answers are grounded in
+what was actually recorded.
+
+**Index.** `chat_index` is a SQLite FTS5 table inside the same local database — no extra
+service and no embedding model. Each meeting contributes its summary, goals, key topics,
+decisions, next steps, tasks, requested changes, mentioned people, and its transcript grouped
+into overlapping 8-line passages that keep speakers and timestamps. It is rebuilt for a
+meeting whenever its transcript or analysis changes, dropped when the meeting is deleted, and
+back-filled at startup for meetings recorded before the feature existed (62 meetings ≈ 0.3 s).
+
+**Retrieval.** The question is reduced to its meaningful words (stopwords dropped, so "what
+should we do about predictions" ranks on *predictions*) and matched with BM25, newest meeting
+first among equal ranks.
+
+**Generation.** The top passages are numbered and placed in the system prompt with the same
+evidence rules the analysis pipeline follows: anything presented as having happened in a
+meeting must come from a passage and carry its citation (`[1]`), general knowledge is allowed
+but must be labelled as such and never cited, and a person mentioned in a meeting is still not
+an attendee. Ollama streams the reply, which the API forwards as server-sent events
+(`start` → `sources` → `token`… → `done`). Only the citations the answer actually used are
+stored with the message and shown in the UI.
+
+**Conversations** are stored in `chat_conversations` / `chat_messages`, so history survives a
+reload. Everything stays on the machine.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/chat` | Ask a question; streams `text/event-stream` |
+| `GET` / `DELETE` / `PATCH` | `/chat/conversations[/{id}]` | List, read, delete, rename conversations |
 
 ## 8. Audio capture
 

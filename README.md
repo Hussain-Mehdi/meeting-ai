@@ -531,6 +531,8 @@ Base URL: `http://127.0.0.1:8000/api`
 | `GET` | `/meetings/{id}/audio` | Stream the saved recording for evidence playback |
 | `GET` | `/meetings/{id}/transcript/export?format=txt\|srt\|json&language=both\|original\|english` | Whole transcript as a download (`download=false` returns it inline for copying) |
 | `GET` | `/templates`, `/voices` | Meeting templates; remembered voices |
+| `POST` | `/chat` | Ask a question about your meetings (streamed, with citations) |
+| `GET` / `DELETE` | `/chat/conversations[/{id}]` | Chat history |
 | `GET` | `/tasks` | All tasks |
 | `GET` | `/tasks/me` | Personal tasks |
 | `PATCH` | `/tasks/{id}` | Update task status |
