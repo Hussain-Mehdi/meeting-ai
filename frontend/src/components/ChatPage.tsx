@@ -6,7 +6,7 @@ import {MessageSquarePlus, Trash2, FileText, Clock, Globe, ExternalLink} from 'l
 import {api} from '../api';
 import PromptComposer from './PromptComposer';
 import SpeechBubble from './SpeechBubble';
-import {LoaderGrid} from './LoadingState';
+import SearchingIndicator, {type Stage} from './SearchingIndicator';
 import {cn} from '../lib/utils';
 
 type Source = {n: number; meeting_id: string; meeting_title: string; date: string; kind: string; heading?: string; start?: number; excerpt: string};
@@ -111,6 +111,7 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
   const [web, setWeb] = useState(false);
   const [webAvailable, setWebAvailable] = useState(false);
   const [webQuery, setWebQuery] = useState<string | null>(null);
+  const [stage, setStage] = useState<Stage>('reading');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [highlight, setHighlight] = useState<number | null>(null);
@@ -150,7 +151,8 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
   const send = async (text: string) => {
     setError('');
     setMessages(current => [...current, {role: 'user', content: text}]);
-    setStreaming(''); setLiveSources([]); setLiveWeb([]); setWebQuery(null); setBusy(true);
+    setStreaming(''); setLiveSources([]); setLiveWeb([]); setWebQuery(null);
+    setStage(web ? 'searching' : 'reading'); setBusy(true);
     const controller = new AbortController();
     abort.current = controller;
     let answer = '';
@@ -182,12 +184,14 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
           if (!event || !raw) continue;
           const data = JSON.parse(raw);
           if (event === 'start') newId = data.conversation_id;
+          else if (event === 'searching') {setStage('searching'); setWebQuery(data.query || null)}
           else if (event === 'sources') {
             sources = data.sources || []; setLiveSources(sources);
             webSources = data.web || []; setLiveWeb(webSources);
             setWebQuery(data.web_query || null);
+            setStage('reading');
           }
-          else if (event === 'token') {answer += data.text; setStreaming(answer)}
+          else if (event === 'token') {answer += data.text; setStage('writing'); setStreaming(answer)}
           else if (event === 'error') throw new Error(data.message);
           else if (event === 'done') {sources = data.sources || []; webSources = data.web || []}
         }
@@ -262,6 +266,9 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
                     ? <span className="whitespace-pre-wrap break-words">{message.content}</span>
                     : <AnswerText text={message.content} sources={message.sources || []} web={message.web || []} onCite={citeJump}/>}
                 </SpeechBubble>
+                {message.role === 'assistant' && !!message.web?.length && webQuery && index === messages.length - 1 && (
+                  <p className="pl-1 text-[11px] text-ink-4">Searched the web for: “{webQuery}”</p>
+                )}
                 {message.role === 'assistant' && (!!message.sources?.length || !!message.web?.length) && (
                   <div className="grid min-w-0 gap-2 pr-10 sm:grid-cols-2 xl:grid-cols-3">
                     {(message.sources || []).map(source => (
@@ -274,14 +281,14 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
             ))}
             {busy && (
               <div className="flex flex-col gap-2">
-                <SpeechBubble side="left">
-                  {streaming
-                    ? <AnswerText text={streaming} sources={liveSources} web={liveWeb} onCite={citeJump}/>
-                    : <span className="flex items-center gap-2.5 text-ink-3"><LoaderGrid/>{webQuery ? 'Reading your meetings and searching the web…' : 'Reading your meetings…'}</span>}
-                </SpeechBubble>
-                {webQuery && (
-                  /* Always show exactly what left the machine. */
-                  <p className="pl-1 text-[11.5px] text-ink-4">Searched the web for: “{webQuery}”</p>
+                {!streaming && (
+                  <SearchingIndicator stage={stage} query={webQuery}
+                    domains={liveWeb.map(result => result.domain).filter(Boolean)}/>
+                )}
+                {streaming && (
+                  <SpeechBubble side="left">
+                    <AnswerText text={streaming} sources={liveSources} web={liveWeb} onCite={citeJump}/>
+                  </SpeechBubble>
                 )}
               </div>
             )}

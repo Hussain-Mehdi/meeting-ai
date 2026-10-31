@@ -377,6 +377,12 @@ the only part of Meeting AI that sends anything off the machine, so the boundary
 - Backend is `ddgs` (no account, no API key). Any failure — rate limit, network, markup change —
   returns no results and the answer comes from the meetings alone.
 
+While an answer is being produced the chat shows the stages it is going through — searching,
+reading, writing — with the sites it is reading as circular logos. Those favicons are fetched
+from each result's **own domain**, never through a third-party favicon proxy, which would hand
+one company the list of everything you search; a domain that serves none falls back to its
+initial in a tinted circle.
+
 **Conversations** are stored in `chat_conversations` / `chat_messages`, so history survives a
 reload. Apart from an opted-in web search, everything stays on the machine.
 

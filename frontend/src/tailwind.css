@@ -27,6 +27,7 @@
   --color-red-tint: var(--danger-bg);
   --color-red-line: var(--danger-border);
   --color-amber: var(--warn-text);
+  --color-warn: var(--warn-text);
   --color-amber-tint: var(--warn-bg);
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);

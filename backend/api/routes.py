@@ -246,15 +246,18 @@ def create_router(db, service, chat_service=None):
         hits = chat_service.retrieve(question, meeting_id=body.meeting_id)
         context, sources = build_context(hits)
         roster = build_roster(db.recent_meetings(ROSTER_LIMIT))
-        # The only outbound request in the app, and only on an explicit per-message opt-in.
-        # `question` is the user's own text; no retrieved passage is ever part of the query.
-        web_results = chat_service.web.search(question) if (body.web and chat_service.web) else []
-        web_block = build_web_block(web_results)
+        wants_web = bool(body.web and chat_service.web)
         db.add_message(conversation_id, "user", question)
 
         def events():
             answer = []
             yield f"event: start\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
+            # The only outbound request in the app, and only on an explicit per-message opt-in.
+            # `question` is the user's own text; no retrieved passage is ever part of the query.
+            if wants_web:
+                yield f"event: searching\ndata: {json.dumps({'query': question})}\n\n"
+            web_results = chat_service.web.search(question) if wants_web else []
+            web_block = build_web_block(web_results)
             yield ("event: sources\ndata: " + json.dumps({
                 "sources": sources,
                 "web": [r.as_dict() for r in web_results],

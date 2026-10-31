@@ -52,7 +52,9 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint, we
 
   return (
     <div className="bui w-full">
-      <div className={cn('relative flex flex-col overflow-hidden rounded-[18px] border border-line bg-card',
+      {/* One row: field, web toggle, send. The hint lives under it only while the field is
+          empty, so a composer in use takes as little vertical space as possible. */}
+      <div className={cn('relative flex items-end gap-2 rounded-[16px] border border-line bg-card px-2 py-1.5',
         disabled && 'opacity-60')}>
         <textarea
           ref={area} value={value} rows={1} disabled={disabled}
@@ -62,47 +64,40 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint, we
           onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey) {event.preventDefault(); send()}
           }}
-          className="block max-h-45 w-full px-4 pt-3.5 pb-1 text-[14px] leading-relaxed text-ink placeholder:text-ink-4"
+          className="block max-h-40 min-w-0 flex-1 px-2 py-1.5 text-[14px] leading-relaxed text-ink placeholder:text-ink-4"
         />
-        <div className="flex items-center justify-between gap-3 px-2.5 pt-1 pb-2.5">
-          <div className="flex min-w-0 items-center gap-2.5">
-            {setWeb && (
-              /* The only control in the app that lets anything leave this machine, so it says
-                 exactly what it does and starts off. */
-              <button type="button" role="switch" aria-checked={!!web} disabled={!webAvailable}
-                onClick={() => setWeb(!web)}
-                title={webAvailable ? 'Also search the web. Only the words you type are sent.'
-                                    : 'Web search is unavailable'}
-                className={cn('group flex shrink-0 items-center gap-1.5 rounded-full border py-1 pr-2.5 pl-1 text-[11.5px] transition-colors',
-                  web ? 'border-green bg-green-tint text-green' : 'border-line text-ink-4 hover:text-ink-2',
-                  !webAvailable && 'cursor-not-allowed opacity-50')}>
-                <span className={cn('relative h-4 w-7 rounded-full transition-colors',
-                  web ? 'bg-green' : 'bg-inset')}>
-                  <span className={cn('absolute top-0.5 size-3 rounded-full bg-card shadow-sm transition-all',
-                    web ? 'left-3.5' : 'left-0.5')}/>
-                </span>
-                <Globe size={12}/>Web
-              </button>
-            )}
-            <span className="truncate text-[11.5px] text-ink-4">
-              {web ? 'Your message is sent to a search engine. Meeting content never is.'
-                   : (hint || 'Enter to send · Shift+Enter for a new line')}
-            </span>
-          </div>
-          {busy ? (
-            <button type="button" onClick={onStop} title="Stop generating"
-              className="flex size-8 shrink-0 items-center justify-center rounded-full border border-line text-ink-2 hover:bg-inset">
-              <Square size={12} fill="currentColor"/>
-            </button>
-          ) : (
-            <button type="button" onClick={send} disabled={!value.trim() || disabled} title="Send"
-              className={cn('flex size-8 shrink-0 items-center justify-center rounded-full transition-colors',
-                value.trim() && !disabled ? 'bg-accent text-on-accent hover:opacity-90' : 'bg-inset text-ink-4')}>
-              <ArrowUp size={16}/>
-            </button>
-          )}
-        </div>
+        {setWeb && (
+          /* The only control in the app that lets anything leave this machine. */
+          <button type="button" role="switch" aria-checked={!!web} disabled={!webAvailable}
+            onClick={() => setWeb(!web)}
+            title={webAvailable
+              ? (web ? 'Web search on — only the words you type are sent' : 'Also search the web')
+              : 'Web search is unavailable'}
+            className={cn('mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors',
+              web ? 'border-green bg-green-tint text-green' : 'border-transparent text-ink-4 hover:bg-inset hover:text-ink-2',
+              !webAvailable && 'cursor-not-allowed opacity-40')}>
+            <Globe size={15}/>
+          </button>
+        )}
+        {busy ? (
+          <button type="button" onClick={onStop} title="Stop generating"
+            className="mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-line text-ink-2 hover:bg-inset">
+            <Square size={12} fill="currentColor"/>
+          </button>
+        ) : (
+          <button type="button" onClick={send} disabled={!value.trim() || disabled} title="Send"
+            className={cn('mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full transition-colors',
+              value.trim() && !disabled ? 'bg-accent text-on-accent hover:opacity-90' : 'bg-inset text-ink-4')}>
+            <ArrowUp size={16}/>
+          </button>
+        )}
       </div>
+      {!value && (
+        <p className="mt-1.5 px-2 text-[11px] text-ink-4">
+          {web ? 'Web search is on: your message is sent to a search engine. Meeting content never is.'
+               : (hint || 'Enter to send · Shift+Enter for a new line')}
+        </p>
+      )}
     </div>
   );
 }
