@@ -212,8 +212,10 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
 
   const empty = !messages.length && !streaming;
   return (
-    /* header 68 + section padding 34 + main bottom padding 80 */
-    <section className="bui flex h-[calc(100vh-182px)] min-h-125 flex-col">
+    /* Fill the window below the 68px header. box-sizing is border-box, so the section's own
+       34px padding-top is inside this height; the -mb-20 cancels main's 80px bottom padding,
+       which would otherwise strand the composer well above the window edge. */
+    <section className="bui -mb-20 flex h-[calc(100vh-68px)] min-h-125 flex-col">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="eyebrow">ASK</p>
@@ -227,10 +229,12 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
       </div>
 
       {conversations.length > 0 && (
-        <div className="mt-4 flex flex-wrap gap-1.5">
-          {conversations.slice(0, 8).map(conversation => (
+        /* One scrolling row rather than a wrapping block, so a long history never eats the
+           height the conversation itself should have. */
+        <div className="mt-4 flex w-full min-w-0 gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {conversations.slice(0, 12).map(conversation => (
             <span key={conversation.id}
-              className={cn('group inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[12px] transition-colors',
+              className={cn('group inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-[12px] transition-colors',
                 conversation.id === conversationId ? 'border-transparent bg-accent text-on-accent' : 'border-line-soft text-ink-2 hover:bg-inset')}>
               <button type="button" className="max-w-50 truncate" onClick={() => openConversation(conversation.id)}>{conversation.title}</button>
               <button type="button" aria-label={`Delete ${conversation.title}`} onClick={() => removeConversation(conversation.id)}
@@ -298,7 +302,7 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
       </div>
 
       {error && <p className="mt-3 text-[12.5px] text-red" role="alert">{error}</p>}
-      <div className="mt-3 pb-4">
+      <div className="mt-3 pb-2">
         <PromptComposer onSend={send} busy={busy} onStop={() => abort.current?.abort()}
           web={web} setWeb={setWeb} webAvailable={webAvailable}/>
       </div>

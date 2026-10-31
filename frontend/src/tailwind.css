@@ -15,6 +15,7 @@
   --color-card: var(--surface);
   --color-line: var(--border);
   --color-line-soft: var(--border-soft);
+  --color-border-focus: var(--border-focus);
   --color-ink: var(--text);
   --color-ink-2: var(--text-secondary);
   --color-ink-3: var(--text-muted);

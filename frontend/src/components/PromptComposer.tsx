@@ -50,11 +50,16 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint, we
     onSend(text);
   };
 
+  const ready = !!value.trim() && !disabled;
   return (
     <div className="bui w-full">
-      {/* One row: field, web toggle, send. The hint lives under it only while the field is
-          empty, so a composer in use takes as little vertical space as possible. */}
-      <div className={cn('relative flex items-end gap-2 rounded-[16px] border border-line bg-card px-2 py-1.5',
+      {/* One row that grows with the text. The chrome sits inside the field rather than in a
+          second row below it, so the composer stays about the height of a single line. */}
+      <div className={cn(
+        'group relative flex items-end gap-1.5 rounded-[20px] border border-line bg-card p-1.5',
+        'shadow-[0_1px_2px_var(--shadow-soft),0_8px_24px_-18px_var(--shadow)]',
+        'transition-[border-color,box-shadow] duration-200',
+        'focus-within:border-border-focus focus-within:shadow-[0_0_0_3px_var(--focus-ring),0_8px_24px_-18px_var(--shadow)]',
         disabled && 'opacity-60')}>
         <textarea
           ref={area} value={value} rows={1} disabled={disabled}
@@ -64,36 +69,44 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint, we
           onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey) {event.preventDefault(); send()}
           }}
-          className="block max-h-40 min-w-0 flex-1 px-2 py-1.5 text-[14px] leading-relaxed text-ink placeholder:text-ink-4"
+          className="block max-h-40 min-w-0 flex-1 px-2.5 py-2 text-[14.5px] leading-relaxed text-ink placeholder:text-ink-4"
         />
+
         {setWeb && (
-          /* The only control in the app that lets anything leave this machine. */
+          /* The only control in the app that lets anything leave this machine, so it carries a
+             label rather than hiding behind an icon. */
           <button type="button" role="switch" aria-checked={!!web} disabled={!webAvailable}
             onClick={() => setWeb(!web)}
             title={webAvailable
-              ? (web ? 'Web search on — only the words you type are sent' : 'Also search the web')
+              ? (web ? 'Web search is on — only the words you type are sent' : 'Also search the web')
               : 'Web search is unavailable'}
-            className={cn('mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors',
-              web ? 'border-green bg-green-tint text-green' : 'border-transparent text-ink-4 hover:bg-inset hover:text-ink-2',
+            className={cn(
+              'flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[12.5px] font-medium transition-all duration-200',
+              web ? 'border-green/40 bg-green-tint text-green'
+                  : 'border-line-soft text-ink-3 hover:border-line hover:bg-inset hover:text-ink-2',
               !webAvailable && 'cursor-not-allowed opacity-40')}>
-            <Globe size={15}/>
+            <Globe size={14} className={cn('transition-transform duration-300', web && 'rotate-[18deg]')}/>
+            <span className="hidden sm:inline">Web</span>
           </button>
         )}
+
         {busy ? (
           <button type="button" onClick={onStop} title="Stop generating"
-            className="mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-line text-ink-2 hover:bg-inset">
+            className="flex size-9 shrink-0 items-center justify-center rounded-full border border-line text-ink-2 transition-colors hover:bg-inset">
             <Square size={12} fill="currentColor"/>
           </button>
         ) : (
-          <button type="button" onClick={send} disabled={!value.trim() || disabled} title="Send"
-            className={cn('mb-0.5 flex size-8 shrink-0 items-center justify-center rounded-full transition-colors',
-              value.trim() && !disabled ? 'bg-accent text-on-accent hover:opacity-90' : 'bg-inset text-ink-4')}>
-            <ArrowUp size={16}/>
+          <button type="button" onClick={send} disabled={!ready} title="Send"
+            className={cn('flex size-9 shrink-0 items-center justify-center rounded-full transition-all duration-200',
+              ready ? 'bg-accent text-on-accent hover:scale-105 active:scale-95'
+                    : 'bg-inset text-ink-4')}>
+            <ArrowUp size={17}/>
           </button>
         )}
       </div>
+
       {!value && (
-        <p className="mt-1.5 px-2 text-[11px] text-ink-4">
+        <p className="mt-2 px-3 text-[11px] text-ink-4">
           {web ? 'Web search is on: your message is sent to a search engine. Meeting content never is.'
                : (hint || 'Enter to send · Shift+Enter for a new line')}
         </p>
