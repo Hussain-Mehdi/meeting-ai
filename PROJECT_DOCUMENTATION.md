@@ -368,8 +368,12 @@ The assistant can also search the web, for questions about things newer than the
 the only part of Meeting AI that sends anything off the machine, so the boundary is narrow:
 
 - It is **off by default** and switched on per message in the composer.
-- The query is the user's message **verbatim**. There is deliberately no query-rewriting step —
-  that absence is what makes "no meeting content leaves the machine" a property of the code.
+- The query is built only from the user's own typed words: the current message, plus their own
+  previous question when the current one leans on it. A follow-up like *"what are the updates in
+  that version?"* is meaningless on its own — searched verbatim it returned Windows 11 and
+  Minecraft results — so the subject is carried over from the user's earlier question. Nothing the
+  model wrote and nothing from a meeting is ever part of a query, which is what makes "no meeting
+  content leaves the machine" a property of the code rather than a promise.
 - The query text is never written to the log, and the UI shows the exact string that was sent.
 - Results get their own citation namespace, `[W1]`, a separate prompt block headed *external —
   NOT from the meetings*, and a visually distinct card, so an internet claim can never quietly be

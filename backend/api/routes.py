@@ -10,6 +10,7 @@ from backend.analysis.evidence import attach_evidence_locations
 from backend.analysis.templates import list_templates
 from backend.chat.service import (ROSTER_LIMIT, build_context, build_roster, build_web_block,
                                   used_citations, used_web_citations)
+from backend.web.search import contextual_query
 from backend.audio.devices import AudioDeviceManager
 from backend.config import get_settings
 from backend.reports.pdf import build_meeting_report, content_disposition, report_filename
@@ -254,15 +255,18 @@ def create_router(db, service, chat_service=None):
             yield f"event: start\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
             # The only outbound request in the app, and only on an explicit per-message opt-in.
             # `question` is the user's own text; no retrieved passage is ever part of the query.
+            # Only the user's own words: this message, plus their own earlier question when
+            # this one leans on it ("the updates in *that version*").
+            search_query = contextual_query(question, [m["content"] for m in history if m["role"] == "user"])
             if wants_web:
-                yield f"event: searching\ndata: {json.dumps({'query': question})}\n\n"
-            web_results = chat_service.web.search(question) if wants_web else []
+                yield f"event: searching\ndata: {json.dumps({'query': search_query})}\n\n"
+            web_results = chat_service.web.search(search_query) if wants_web else []
             web_block = build_web_block(web_results)
             yield ("event: sources\ndata: " + json.dumps({
                 "sources": sources,
                 "web": [r.as_dict() for r in web_results],
                 # Shown in the UI so the user can always see exactly what left the machine.
-                "web_query": question if body.web else None,
+                "web_query": search_query if body.web else None,
             }) + "\n\n")
             try:
                 for chunk in chat_service.stream_answer(question, history, context, roster, web_block):

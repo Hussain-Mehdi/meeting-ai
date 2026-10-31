@@ -93,6 +93,9 @@ sources, not things anyone said in a meeting.
   difference explicit.
 - They may be wrong or out of date; attribute them ("according to <site>") rather than
   asserting them.
+- The user asked for a web answer, so judge it against the web. If these results do not answer
+  the question, say that the search did not turn it up and suggest where to look — do NOT say
+  "the meetings do not cover it", which answers a question nobody asked.
 
 {results}
 """

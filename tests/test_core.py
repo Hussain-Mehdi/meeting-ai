@@ -1449,3 +1449,33 @@ def test_web_and_meeting_citations_stay_in_separate_namespaces():
     block = build_web_block(web)
     assert "NOT from the meetings" in block and "[W1] Ollama releases - ollama.com" in block
     assert build_web_block([]) == ""                                      # nothing added when unused
+
+
+def test_follow_up_searches_carry_the_subject_from_the_users_own_question():
+    """A follow-up searched verbatim is meaningless: "what are the updates in that version?"
+    returned Windows 11 and Minecraft results until the subject was carried over."""
+    from backend.web.search import contextual_query
+    earlier = ["what is the latest flutter version available?"]
+    assert contextual_query("what are the updates in that version?", earlier) == (
+        "what is the latest flutter version available? what are the updates in that version?")
+    assert contextual_query("and the release date?", earlier).startswith(earlier[0])     # short
+    # a self-contained question is left alone
+    standalone = "Which database does Postgres use for full text search indexing internally?"
+    assert contextual_query(standalone, earlier) == standalone
+    # nothing to carry, nothing added
+    assert contextual_query("what are the updates in that version?", []) == "what are the updates in that version?"
+    assert contextual_query("", earlier) == ""
+    assert len(contextual_query("tell me about it", ["x" * 500])) <= 300                 # bounded
+
+
+def test_search_query_never_contains_meeting_content(tmp_path):
+    """The privacy guarantee under follow-ups: only the user's own turns can reach a query."""
+    from backend.web.search import contextual_query
+    history = [
+        {"role": "user", "content": "what is the latest flutter version?"},
+        {"role": "assistant", "content": "Your meeting on 29 Oct discussed the tournament screen [1]."},
+    ]
+    earlier = [m["content"] for m in history if m["role"] == "user"]
+    query = contextual_query("what changed in it?", earlier)
+    assert "tournament" not in query and "meeting" not in query and "29 Oct" not in query
+    assert query == "what is the latest flutter version? what changed in it?"
