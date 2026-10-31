@@ -12,6 +12,7 @@ from datetime import datetime
 
 import httpx
 
+from backend.chat.fusion import RRF_CANDIDATES, RRF_K, reciprocal_rank_fusion
 from backend.chat.scope import detect_scope
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,9 @@ only from the numbered passages below, and every such statement must carry the c
 the passage it came from, written exactly like [1] or [2]. If the passages do not answer the
 question, say plainly that the meetings do not cover it. Never guess, never fill gaps, never
 merge two meetings into one event.
+
+If a WEB RESULTS section appears below, it is external information the user explicitly asked
+for; cite it as [W1] and never as a meeting fact.
 
 You may also answer from your own general knowledge — definitions, how something usually
 works, options worth considering — but say so in your own words ("Generally, ...",
@@ -64,16 +68,34 @@ invent a meeting or a date that is not on it. "The last meeting" means the first
 {roster}
 
 ==================================================
-RETRIEVED PASSAGES
+RETRIEVED PASSAGES (from the meetings)
 ==================================================
 
 {context}
-"""
+{web}"""
 
 NO_CONTEXT_NOTE = """(No meeting passage matched this question. Say that the meetings do not
 appear to cover it, then answer from general knowledge if that is useful, clearly labelled.)"""
 
 ROSTER_LIMIT = 12
+
+WEB_BLOCK = """
+==================================================
+WEB RESULTS (external - NOT from the meetings)
+==================================================
+
+These came from a web search run just now, because the user asked for it. They are outside
+sources, not things anyone said in a meeting.
+
+- Cite them as [W1], [W2] - a different marker from meeting passages on purpose.
+- Never describe anything here as something that was said, decided, agreed or assigned in a
+  meeting, and never let a web claim and a meeting fact share a sentence without making the
+  difference explicit.
+- They may be wrong or out of date; attribute them ("according to <site>") rather than
+  asserting them.
+
+{results}
+"""
 
 
 def build_roster(meetings: list[dict]) -> str:
@@ -98,6 +120,14 @@ def _when(started_at: str) -> str:
 def _clock(seconds) -> str:
     total = int(max(0.0, float(seconds or 0)))
     return f"{total // 60}:{total % 60:02d}"
+
+
+def build_web_block(results) -> str:
+    """Render web results in their own citation namespace, or nothing at all."""
+    if not results:
+        return ""
+    blocks = [f"[W{result.n}] {result.title} - {result.domain}\n{result.snippet}" for result in results]
+    return WEB_BLOCK.format(results="\n\n".join(blocks))
 
 
 def build_context(hits: list[dict]) -> tuple[str, list[dict]]:
@@ -129,17 +159,49 @@ def build_context(hits: list[dict]) -> tuple[str, list[dict]]:
 
 
 def used_citations(answer: str, sources: list[dict]) -> list[dict]:
-    """Keep only the sources the answer actually cited, so the UI never shows unused ones."""
+    """Keep only the meeting sources the answer cited, so the UI never shows unused ones.
+
+    `[W1]`-style web markers are deliberately not matched here: the two namespaces stay
+    separate all the way to the UI."""
     cited = {int(n) for n in re.findall(r"\[(\d{1,2})\]", answer or "")}
     return [s for s in sources if s["n"] in cited] if cited else []
 
 
+def used_web_citations(answer: str, results) -> list[dict]:
+    cited = {int(n) for n in re.findall(r"\[W(\d{1,2})\]", answer or "", flags=re.IGNORECASE)}
+    return [r.as_dict() for r in results if r.n in cited] if cited else []
+
+
 class ChatService:
-    def __init__(self, db, llm, settings):
+    def __init__(self, db, llm, settings, vectors=None, web=None):
         self.db = db
         self.llm = llm
         self.settings = settings
+        self.vectors = vectors
+        self.web = web
         self.client = httpx.Client(timeout=httpx.Timeout(connect=5, read=600, write=30, pool=5))
+
+    def _search(self, question: str, limit: int, meeting_id: str | None = None,
+                meeting_ids: list[str] | None = None) -> list[dict]:
+        """Keyword and semantic search over the same passages, fused by rank.
+
+        With no vector index the fusion is a no-op by construction (see fusion.py), so this
+        returns exactly what keyword search returned before semantic search existed.
+        """
+        lexical = self.db.search_index(question, limit=RRF_CANDIDATES,
+                                       meeting_id=meeting_id, meeting_ids=meeting_ids)
+        vectors = getattr(self, "vectors", None)
+        if vectors is None:
+            return lexical[:limit]
+        dense = vectors.search(question, limit=RRF_CANDIDATES,
+                               meeting_id=meeting_id, meeting_ids=meeting_ids)
+        if not dense:
+            return lexical[:limit]
+        settings = self.settings
+        return reciprocal_rank_fusion(
+            [lexical, dense],
+            weights=[float(getattr(settings, "bm25_weight", 1.0)), float(getattr(settings, "vector_weight", 1.0))],
+            k=int(getattr(settings, "rrf_k", RRF_K)), limit=limit)
 
     def retrieve(self, question: str, meeting_id: str | None = None, limit: int = 12) -> list[dict]:
         """Find the passages a question needs.
@@ -149,7 +211,7 @@ class ChatService:
         search alone cannot do this: "last" and "meeting" are words people say constantly.
         """
         if meeting_id:
-            hits = self.db.search_index(question, limit=limit, meeting_id=meeting_id)
+            hits = self._search(question, limit, meeting_id=meeting_id)
             return hits or self.db.meeting_passages(meeting_id, limit=limit)
 
         scope = detect_scope(question)
@@ -160,11 +222,13 @@ class ChatService:
             scoped_ids = self.db.meeting_ids_between(scope["start"].isoformat(), scope["end"].isoformat())
 
         if not scoped_ids:
-            return self.db.search_index(question, limit=limit)
+            return self._search(question, limit)
 
         # Inside the chosen meetings, prefer passages that match the question, but always
         # include each meeting's own material so "summarise it" works without keyword luck.
-        matched = self.db.search_index(question, limit=limit, meeting_ids=scoped_ids)
+        # Both retrievers are given the scoped meetings: an unscoped semantic search would
+        # pull similar-sounding passages from every meeting and reopen the bug scope.py fixed.
+        matched = self._search(question, limit, meeting_ids=scoped_ids)
         per_meeting = max(3, limit // max(1, len(scoped_ids)))
         hits: list[dict] = []
         seen: set[tuple] = set()
@@ -182,12 +246,14 @@ class ChatService:
         log.info("chat scope=%s meetings=%s passages=%s", scope["kind"], len(scoped_ids), len(hits))
         return hits[:limit]
 
-    def _messages(self, question: str, history: list[dict], context: str, roster: str = "") -> list[dict]:
+    def _messages(self, question: str, history: list[dict], context: str, roster: str = "",
+                  web: str = "") -> list[dict]:
         system = SYSTEM_PROMPT.format(
             user_name=self.settings.user_name,
             today=datetime.now().strftime("%d %B %Y"),
             roster=roster or build_roster(getattr(self, "db", None) and self.db.recent_meetings(ROSTER_LIMIT) or []),
             context=context or NO_CONTEXT_NOTE,
+            web=web,
         )
         messages = [{"role": "system", "content": system}]
         for item in history[-MAX_HISTORY_MESSAGES:]:
@@ -197,11 +263,12 @@ class ChatService:
         messages.append({"role": "user", "content": question})
         return messages
 
-    def stream_answer(self, question: str, history: list[dict], context: str, roster: str = ""):
+    def stream_answer(self, question: str, history: list[dict], context: str, roster: str = "",
+                      web: str = ""):
         """Yield answer chunks from Ollama as they arrive."""
         payload = {
             "model": self.llm.model,
-            "messages": self._messages(question, history, context, roster),
+            "messages": self._messages(question, history, context, roster, web),
             "stream": True,
             "think": False,
             "options": {"temperature": 0.2, "num_ctx": self.llm.num_ctx},

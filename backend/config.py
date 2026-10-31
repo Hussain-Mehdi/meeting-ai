@@ -40,6 +40,24 @@ class Settings(BaseSettings):
     # WhatsApp Desktop calls (the call window exists only during a call). WhatsApp Web is not
     # detected: an open tab says nothing about whether a call is running.
     detect_whatsapp_app: bool = True
+    # Semantic search over meetings. The embedding model runs in the Ollama already in use;
+    # retrieval_mode=bm25 turns all of it off and restores pure keyword search.
+    embedding_enabled: bool = True
+    embedding_model: str = "nomic-embed-text"
+    embedding_dim: int = 0                     # 0 = discover from the first response
+    embedding_batch: int = 16
+    embedding_retry_seconds: float = 300.0
+    embedding_debounce_seconds: float = 20.0
+    retrieval_mode: str = "hybrid"             # hybrid | bm25 | vector
+    rrf_k: int = 60
+    bm25_weight: float = 1.0
+    vector_weight: float = 1.0
+    vector_min_score: float = 0.0
+    # Web search is the one thing that leaves this machine, so it is opt-in per message and
+    # only ever sends the user's own words. This flag decides whether it may be used at all.
+    web_search_enabled: bool = True
+    web_search_results: int = 5
+    web_search_timeout: float = 8.0
     max_recording_hours: float = 4.0
     resume_interrupted_processing: bool = True
     # False: after a recording only the transcript is produced; the user reviews it (edit,

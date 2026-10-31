@@ -2,7 +2,7 @@
  * citations in an answer are clickable and open the meeting they came from. */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {motion} from 'motion/react';
-import {MessageSquarePlus, Trash2, FileText, Clock} from 'lucide-react';
+import {MessageSquarePlus, Trash2, FileText, Clock, Globe, ExternalLink} from 'lucide-react';
 import {api} from '../api';
 import PromptComposer from './PromptComposer';
 import SpeechBubble from './SpeechBubble';
@@ -10,7 +10,8 @@ import {LoaderGrid} from './LoadingState';
 import {cn} from '../lib/utils';
 
 type Source = {n: number; meeting_id: string; meeting_title: string; date: string; kind: string; heading?: string; start?: number; excerpt: string};
-type Message = {id?: string; role: 'user' | 'assistant'; content: string; sources?: Source[]};
+type WebSource = {n: number; title: string; url: string; snippet: string; domain: string};
+type Message = {id?: string; role: 'user' | 'assistant'; content: string; sources?: Source[]; web?: WebSource[]};
 type Conversation = {id: string; title: string; updated_at: string; messages?: number};
 
 const STARTERS = [
@@ -27,11 +28,25 @@ const clock = (seconds?: number) => {
 /** Render [1]-style citations as buttons that jump to the matching source card.
  *  A citation keeps any punctuation that follows it on the same line, so an answer never
  *  wraps with a lone full stop at the start of the next line. */
-function AnswerText({text, sources, onCite}: {text: string; sources: Source[]; onCite: (n: number) => void}) {
-  const parts = useMemo(() => text.split(/(\[\d{1,2}\][.,;:!?)]*)/g), [text]);
+function AnswerText({text, sources, web = [], onCite}: {text: string; sources: Source[]; web?: WebSource[]; onCite: (n: number) => void}) {
+  const parts = useMemo(() => text.split(/(\[W?\d{1,2}\][.,;:!?)]*)/gi), [text]);
   return (
     <div className="whitespace-pre-wrap break-words">
       {parts.map((part, index) => {
+        const webMatch = /^\[W(\d{1,2})\]([.,;:!?)]*)$/i.exec(part);
+        if (webMatch) {
+          const result = web.find(w => w.n === Number(webMatch[1]));
+          if (!result) return <span key={index}>{part}</span>;
+          return (
+            <span key={index} className="whitespace-nowrap">
+              <a href={result.url} target="_blank" rel="noreferrer noopener" title={`${result.title} — ${result.domain}`}
+                className="mx-0.5 inline-flex h-4.5 items-center gap-0.5 rounded-full bg-inset px-1.5 align-[1px] text-[10.5px] font-semibold text-ink-2 hover:text-ink">
+                <Globe size={9}/>{result.n}
+              </a>
+              {webMatch[2]}
+            </span>
+          );
+        }
         const match = /^\[(\d{1,2})\]([.,;:!?)]*)$/.exec(part);
         const source = match && sources.find(s => s.n === Number(match[1]));
         if (!source) return <span key={index}>{part}</span>;
@@ -47,6 +62,22 @@ function AnswerText({text, sources, onCite}: {text: string; sources: Source[]; o
         );
       })}
     </div>
+  );
+}
+
+function WebCard({result}: {result: WebSource}) {
+  return (
+    <a href={result.url} target="_blank" rel="noreferrer noopener"
+      className="block rounded-[12px] border border-line-soft bg-card p-2.5 transition-colors hover:bg-inset">
+      <div className="flex items-center gap-2 text-[11.5px] text-ink-3">
+        <span className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-full bg-inset text-[9px] font-semibold text-ink-2">
+          <Globe size={9}/>
+        </span>
+        <span className="truncate font-medium text-ink-2">{result.title}</span>
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1">{result.domain}<ExternalLink size={10}/></span>
+      </div>
+      <p className="mt-1.5 line-clamp-2 break-words text-[12px] leading-relaxed text-ink-3">{result.snippet}</p>
+    </a>
   );
 }
 
@@ -76,6 +107,10 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streaming, setStreaming] = useState('');
   const [liveSources, setLiveSources] = useState<Source[]>([]);
+  const [liveWeb, setLiveWeb] = useState<WebSource[]>([]);
+  const [web, setWeb] = useState(false);
+  const [webAvailable, setWebAvailable] = useState(false);
+  const [webQuery, setWebQuery] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [highlight, setHighlight] = useState<number | null>(null);
@@ -84,6 +119,7 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
 
   const loadConversations = () => api<Conversation[]>('/chat/conversations').then(setConversations).catch(() => {});
   useEffect(() => {loadConversations()}, []);
+  useEffect(() => {api<any>("/settings").then((s: any) => setWebAvailable(!!s?.retrieval?.web?.available)).catch(() => {})}, []);
   useEffect(() => {bottom.current?.scrollIntoView({behavior: 'smooth', block: 'end'})}, [messages.length, streaming]);
 
   const openConversation = async (id: string) => {
@@ -114,16 +150,17 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
   const send = async (text: string) => {
     setError('');
     setMessages(current => [...current, {role: 'user', content: text}]);
-    setStreaming(''); setLiveSources([]); setBusy(true);
+    setStreaming(''); setLiveSources([]); setLiveWeb([]); setWebQuery(null); setBusy(true);
     const controller = new AbortController();
     abort.current = controller;
     let answer = '';
     let sources: Source[] = [];
+    let webSources: WebSource[] = [];
     let newId = conversationId;
     try {
       const response = await fetch('/api/chat', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, signal: controller.signal,
-        body: JSON.stringify({message: text, conversation_id: conversationId}),
+        body: JSON.stringify({message: text, conversation_id: conversationId, web}),
       });
       if (!response.ok || !response.body) {
         let detail = response.statusText;
@@ -145,23 +182,27 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
           if (!event || !raw) continue;
           const data = JSON.parse(raw);
           if (event === 'start') newId = data.conversation_id;
-          else if (event === 'sources') {sources = data.sources || []; setLiveSources(sources)}
+          else if (event === 'sources') {
+            sources = data.sources || []; setLiveSources(sources);
+            webSources = data.web || []; setLiveWeb(webSources);
+            setWebQuery(data.web_query || null);
+          }
           else if (event === 'token') {answer += data.text; setStreaming(answer)}
           else if (event === 'error') throw new Error(data.message);
-          else if (event === 'done') sources = data.sources || [];
+          else if (event === 'done') {sources = data.sources || []; webSources = data.web || []}
         }
       }
-      setMessages(current => [...current, {role: 'assistant', content: answer, sources}]);
+      setMessages(current => [...current, {role: 'assistant', content: answer, sources, web: webSources}]);
       setConversationId(newId);
       loadConversations();
     } catch (exception: any) {
       if (exception?.name === 'AbortError') {
-        if (answer.trim()) setMessages(current => [...current, {role: 'assistant', content: answer, sources}]);
+        if (answer.trim()) setMessages(current => [...current, {role: 'assistant', content: answer, sources, web: webSources}]);
       } else {
         setError(exception?.message || 'The assistant could not answer.');
       }
     } finally {
-      setBusy(false); setStreaming(''); setLiveSources([]); abort.current = null;
+      setBusy(false); setStreaming(''); setLiveSources([]); setLiveWeb([]); abort.current = null;
     }
   };
 
@@ -219,13 +260,14 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
                 <SpeechBubble side={message.role === 'user' ? 'right' : 'left'}>
                   {message.role === 'user'
                     ? <span className="whitespace-pre-wrap break-words">{message.content}</span>
-                    : <AnswerText text={message.content} sources={message.sources || []} onCite={citeJump}/>}
+                    : <AnswerText text={message.content} sources={message.sources || []} web={message.web || []} onCite={citeJump}/>}
                 </SpeechBubble>
-                {message.role === 'assistant' && !!message.sources?.length && (
+                {message.role === 'assistant' && (!!message.sources?.length || !!message.web?.length) && (
                   <div className="grid min-w-0 gap-2 pr-10 sm:grid-cols-2 xl:grid-cols-3">
-                    {message.sources.map(source => (
-                      <SourceCard key={source.n} source={source} open={open} highlighted={highlight === source.n}/>
+                    {(message.sources || []).map(source => (
+                      <SourceCard key={'m' + source.n} source={source} open={open} highlighted={highlight === source.n}/>
                     ))}
+                    {(message.web || []).map(result => <WebCard key={'w' + result.n} result={result}/>)}
                   </div>
                 )}
               </motion.div>
@@ -234,9 +276,13 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
               <div className="flex flex-col gap-2">
                 <SpeechBubble side="left">
                   {streaming
-                    ? <AnswerText text={streaming} sources={liveSources} onCite={citeJump}/>
-                    : <span className="flex items-center gap-2.5 text-ink-3"><LoaderGrid/>Reading your meetings…</span>}
+                    ? <AnswerText text={streaming} sources={liveSources} web={liveWeb} onCite={citeJump}/>
+                    : <span className="flex items-center gap-2.5 text-ink-3"><LoaderGrid/>{webQuery ? 'Reading your meetings and searching the web…' : 'Reading your meetings…'}</span>}
                 </SpeechBubble>
+                {webQuery && (
+                  /* Always show exactly what left the machine. */
+                  <p className="pl-1 text-[11.5px] text-ink-4">Searched the web for: “{webQuery}”</p>
+                )}
               </div>
             )}
             <div ref={bottom}/>
@@ -246,7 +292,8 @@ export default function ChatPage({open}: {open: (id: string) => void}) {
 
       {error && <p className="mt-3 text-[12.5px] text-red" role="alert">{error}</p>}
       <div className="mt-3 pb-4">
-        <PromptComposer onSend={send} busy={busy} onStop={() => abort.current?.abort()}/>
+        <PromptComposer onSend={send} busy={busy} onStop={() => abort.current?.abort()}
+          web={web} setWeb={setWeb} webAvailable={webAvailable}/>
       </div>
     </section>
   );

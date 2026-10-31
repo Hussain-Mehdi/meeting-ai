@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import StreamingResponse
 from backend.analysis.evidence import attach_evidence_locations
 from backend.analysis.templates import list_templates
-from backend.chat.service import ROSTER_LIMIT, build_context, build_roster, used_citations
+from backend.chat.service import (ROSTER_LIMIT, build_context, build_roster, build_web_block,
+                                  used_citations, used_web_citations)
 from backend.audio.devices import AudioDeviceManager
 from backend.config import get_settings
 from backend.reports.pdf import build_meeting_report, content_disposition, report_filename
@@ -30,6 +31,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
     meeting_id: str | None = None
+    # When true, `message` is sent verbatim to a search engine. Nothing else ever is.
+    web: bool = False
 
 
 class ConversationRename(BaseModel):
@@ -243,14 +246,23 @@ def create_router(db, service, chat_service=None):
         hits = chat_service.retrieve(question, meeting_id=body.meeting_id)
         context, sources = build_context(hits)
         roster = build_roster(db.recent_meetings(ROSTER_LIMIT))
+        # The only outbound request in the app, and only on an explicit per-message opt-in.
+        # `question` is the user's own text; no retrieved passage is ever part of the query.
+        web_results = chat_service.web.search(question) if (body.web and chat_service.web) else []
+        web_block = build_web_block(web_results)
         db.add_message(conversation_id, "user", question)
 
         def events():
             answer = []
             yield f"event: start\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
-            yield f"event: sources\ndata: {json.dumps({'sources': sources})}\n\n"
+            yield ("event: sources\ndata: " + json.dumps({
+                "sources": sources,
+                "web": [r.as_dict() for r in web_results],
+                # Shown in the UI so the user can always see exactly what left the machine.
+                "web_query": question if body.web else None,
+            }) + "\n\n")
             try:
-                for chunk in chat_service.stream_answer(question, history, context, roster):
+                for chunk in chat_service.stream_answer(question, history, context, roster, web_block):
                     answer.append(chunk)
                     yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
             except Exception as exc:
@@ -261,8 +273,10 @@ def create_router(db, service, chat_service=None):
                 return
             text = "".join(answer).strip()
             cited = used_citations(text, sources)
-            db.add_message(conversation_id, "assistant", text, cited)
-            yield f"event: done\ndata: {json.dumps({'conversation_id': conversation_id, 'sources': cited})}\n\n"
+            cited_web = used_web_citations(text, web_results)
+            db.add_message(conversation_id, "assistant", text, cited, cited_web)
+            yield ("event: done\ndata: " + json.dumps({
+                "conversation_id": conversation_id, "sources": cited, "web": cited_web}) + "\n\n")
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -375,6 +389,15 @@ def create_router(db, service, chat_service=None):
                    "whisper_task": settings.whisper_task, "ollama_model": settings.ollama_model,
                    "ollama_num_ctx": settings.ollama_num_ctx, "ollama": service.llm.availability(),
                    "whisper": service.transcriber.availability()}, "audio": AudioDeviceManager().report(),
-            "storage": str(settings.recordings_path), "privacy": "All processing and storage remain local."}
+            "retrieval": {
+                "mode": settings.retrieval_mode,
+                "embedding_model": settings.embedding_model,
+                "embeddings": chat_service.vectors.status() if (chat_service and chat_service.vectors)
+                              else {"enabled": False, "message": "Semantic search is off."},
+                "web": chat_service.web.available() if (chat_service and chat_service.web)
+                       else {"available": False, "message": "Web search is off."},
+            },
+            "storage": str(settings.recordings_path),
+            "privacy": "Everything stays on this Mac. Web search, when you switch it on, sends only the words you type."}
 
     return router

@@ -8,7 +8,10 @@ from backend.api.routes import create_router
 from backend.config import get_settings
 from backend.database.db import Database
 from backend.detection.meet_detector import MeetDetector
+from backend.chat.embeddings import EmbeddingClient
 from backend.chat.service import ChatService
+from backend.chat.vectors import VectorIndex
+from backend.web.search import WebSearch
 from backend.meetings.service import MeetingService
 from backend.notifications.macos import notify
 from backend.state import MeetingState, runtime
@@ -24,7 +27,12 @@ recovered_meetings = db.recover_interrupted_meetings()
 if recovered_meetings:
     log.warning("marked interrupted meetings as retryable count=%s resumable=%s", recovered_meetings, interrupted_processing)
 service = MeetingService(settings, db)
-chat_service = ChatService(db, service.llm, settings)
+vector_index = None
+if settings.embedding_enabled and settings.retrieval_mode != "bm25":
+    vector_index = VectorIndex(db, EmbeddingClient(settings.ollama_host, settings.embedding_model,
+                                                   settings.embedding_batch), settings)
+    db.on_reindex = vector_index.schedule
+chat_service = ChatService(db, service.llm, settings, vectors=vector_index, web=WebSearch(settings))
 detector = MeetDetector(timeout=settings.detection_timeout, end_confirmations=settings.detection_end_confirmations,
                         browsers=settings.browsers, zoom_app=settings.detect_zoom_app, teams_app=settings.detect_teams_app,
                         whatsapp_app=settings.detect_whatsapp_app)
@@ -57,11 +65,18 @@ async def lifespan(app):
     log.info("Meeting AI startup")
     indexed = await asyncio.to_thread(db.reindex_all)
     if indexed: log.info("chat index backfilled meetings=%s", indexed)
+    if vector_index:
+        # Embedding runs in the background and yields to recording; chat answers from keyword
+        # search until a meeting's vectors exist, so nothing waits on this.
+        await asyncio.to_thread(vector_index.check_model)
+        vector_index.start()
+        vector_index.schedule()
     tasks = [asyncio.create_task(detector.monitor(detected, ended, settings.detection_interval)),
              asyncio.create_task(service.watchdog())]
     if interrupted_processing and settings.resume_interrupted_processing:
         tasks.append(asyncio.create_task(service.resume_interrupted(interrupted_processing)))
     yield
+    if vector_index: vector_index.stop()
     for task in tasks: task.cancel()
 
 

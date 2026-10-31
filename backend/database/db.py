@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,14 @@ CREATE TABLE IF NOT EXISTS voice_profiles (
  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, embedding TEXT NOT NULL, samples INTEGER DEFAULT 1,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chat_vectors (
+ meeting_id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
+ model TEXT NOT NULL, dim INTEGER NOT NULL,
+ hash TEXT NOT NULL,              -- sha256 of the exact text that was embedded
+ vector BLOB NOT NULL,            -- dim float32, little-endian, already L2-normalised
+ created_at TEXT NOT NULL,
+ PRIMARY KEY (meeting_id, kind, ref)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS chat_conversations (
  id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -67,6 +76,11 @@ class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Bumped whenever indexed rows or vectors change, so an in-memory matrix built from
+        # them knows to rebuild. In-process only: another process writing here will not
+        # invalidate a running server's matrix.
+        self.index_version = 0
+        self.on_reindex: "Callable[[str], None] | None" = None
         with self.connection() as db:
             db.executescript(SCHEMA)
             db.executescript(CHAT_INDEX_SCHEMA)
@@ -80,6 +94,7 @@ class Database:
             "transcript_segments": [("text_en", "TEXT"), ("avg_logprob", "REAL"), ("no_speech_prob", "REAL"),
                                     ("speaker_id", "TEXT"), ("track", "TEXT"), ("edited", "INTEGER DEFAULT 0")],
             "meetings": [("template", "TEXT DEFAULT 'engineering'"), ("platform", "TEXT")],
+            "chat_messages": [("web", "TEXT")],
         }
         for table, fields in additions.items():
             existing = columns(table)
@@ -152,36 +167,147 @@ class Database:
                 new_text_en = new_text if (row["text_en"] or "") == (row["text"] or "") else row["text_en"]
             db.execute("UPDATE transcript_segments SET text=?, text_en=?, speaker=?, edited=1 WHERE id=?",
                        (new_text, new_text_en, new_speaker, segment_id))
-            return dict(db.execute("SELECT * FROM transcript_segments WHERE id=?", (segment_id,)).fetchone())
+            row = dict(db.execute("SELECT * FROM transcript_segments WHERE id=?", (segment_id,)).fetchone())
+        # Outside the block: the write must be committed before reindex_meeting's own
+        # connection reads it, and reindexing inside would risk waiting on our own lock.
+        self.reindex_meeting(meeting_id)
+        return row
 
     def delete_segment(self, meeting_id: str, segment_id: int) -> bool:
         with self.connection() as db:
-            return db.execute("DELETE FROM transcript_segments WHERE id=? AND meeting_id=?", (segment_id, meeting_id)).rowcount > 0
+            removed = db.execute("DELETE FROM transcript_segments WHERE id=? AND meeting_id=?",
+                                 (segment_id, meeting_id)).rowcount > 0
+        if removed:
+            self.reindex_meeting(meeting_id)
+        return removed
 
     def rename_speaker(self, meeting_id: str, old: str, new: str) -> int:
         with self.connection() as db:
-            return db.execute("UPDATE transcript_segments SET speaker=?, edited=1 WHERE meeting_id=? AND speaker=?",
-                              (new.strip(), meeting_id, old)).rowcount
+            changed = db.execute("UPDATE transcript_segments SET speaker=?, edited=1 WHERE meeting_id=? AND speaker=?",
+                                 (new.strip(), meeting_id, old)).rowcount
+        if changed:
+            self.reindex_meeting(meeting_id)
+        return changed
 
     def rename_speaker_id(self, meeting_id: str, speaker_id: str, new: str) -> int:
         with self.connection() as db:
-            return db.execute("UPDATE transcript_segments SET speaker=? WHERE meeting_id=? AND speaker_id=?",
-                              (new.strip(), meeting_id, speaker_id)).rowcount
+            changed = db.execute("UPDATE transcript_segments SET speaker=? WHERE meeting_id=? AND speaker_id=?",
+                                 (new.strip(), meeting_id, speaker_id)).rowcount
+        if changed:
+            self.reindex_meeting(meeting_id)
+        return changed
 
     # ----- chat retrieval index -----
 
     def reindex_meeting(self, meeting_id: str) -> int:
-        """Rebuild one meeting's searchable passages. Safe to call after any change to it."""
+        """Rebuild one meeting's searchable passages. Safe to call after any change to it.
+
+        Vectors for rows that no longer exist are dropped here; the surviving ones are left
+        alone so the embedding worker can reuse them by content hash."""
         meeting = self.get_meeting(meeting_id)
+        rows = meeting_rows(meeting, self.transcript(meeting_id)) if meeting else []
         with self.connection() as db:
             db.execute("DELETE FROM chat_index WHERE meeting_id=?", (meeting_id,))
-            if not meeting:
-                return 0
-            rows = meeting_rows(meeting, self.transcript(meeting_id))
-            db.executemany(
-                "INSERT INTO chat_index(meeting_id,kind,ref,heading,content,start,end) VALUES(?,?,?,?,?,?,?)",
-                [(meeting_id, r["kind"], r["ref"], r["heading"], r["content"], r["start"], r["end"]) for r in rows])
+            if rows:
+                db.executemany(
+                    "INSERT INTO chat_index(meeting_id,kind,ref,heading,content,start,end) VALUES(?,?,?,?,?,?,?)",
+                    [(meeting_id, r["kind"], r["ref"], r["heading"], r["content"], r["start"], r["end"]) for r in rows])
+            # Orphan vectors are diffed in Python: a correlated NOT EXISTS against the FTS5
+            # table's UNINDEXED columns has no index to use and degrades badly.
+            live = {(r["kind"], r["ref"]) for r in rows}
+            stale = [(k, f) for k, f in db.execute(
+                "SELECT kind, ref FROM chat_vectors WHERE meeting_id=?", (meeting_id,)) if (k, f) not in live]
+            if stale:
+                db.executemany("DELETE FROM chat_vectors WHERE meeting_id=? AND kind=? AND ref=?",
+                               [(meeting_id, k, f) for k, f in stale])
+        self.index_version += 1
+        if self.on_reindex:
+            try:
+                self.on_reindex(meeting_id)
+            except Exception:
+                log.exception("reindex hook failed meeting=%s", meeting_id)
         return len(rows)
+
+    # ----- vectors for semantic search -----
+
+    def index_rows_with_hashes(self, meeting_id: str, model: str) -> list[dict]:
+        """Every indexed row for a meeting, with the hash of the vector it already has."""
+        with self.connection() as db:
+            return [dict(row) for row in db.execute(
+                """SELECT c.kind, c.ref, c.heading, c.content, v.hash AS have_hash
+                   FROM chat_index c
+                   LEFT JOIN chat_vectors v ON v.meeting_id = c.meeting_id
+                        AND v.kind = c.kind AND v.ref = c.ref AND v.model = ?
+                   WHERE c.meeting_id = ?""", (model, meeting_id))]
+
+    def vectors_for_meeting(self, meeting_id: str, model: str) -> dict[str, bytes]:
+        """hash -> vector blob, so a re-cut passage whose text is unchanged is not re-embedded."""
+        with self.connection() as db:
+            return {row["hash"]: row["vector"] for row in db.execute(
+                "SELECT hash, vector FROM chat_vectors WHERE meeting_id=? AND model=?", (meeting_id, model))}
+
+    def replace_vectors(self, meeting_id: str, model: str, dim: int,
+                        items: list[tuple[str, str, str, bytes]]) -> int:
+        """items: (kind, ref, hash, vector blob)."""
+        if not items:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as db:
+            db.executemany(
+                """INSERT OR REPLACE INTO chat_vectors(meeting_id,kind,ref,model,dim,hash,vector,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                [(meeting_id, kind, ref, model, dim, digest, blob, now) for kind, ref, digest, blob in items])
+        self.index_version += 1
+        return len(items)
+
+    def load_vectors(self, model: str, dim: int) -> list[tuple[str, str, str, bytes]]:
+        with self.connection() as db:
+            return [(r["meeting_id"], r["kind"], r["ref"], r["vector"]) for r in db.execute(
+                "SELECT meeting_id, kind, ref, vector FROM chat_vectors WHERE model=? AND dim=?", (model, dim))]
+
+    def meetings_needing_vectors(self, model: str) -> list[str]:
+        """Meetings with indexed rows that have no vector yet, newest first."""
+        with self.connection() as db:
+            return [row["id"] for row in db.execute(
+                """SELECT m.id FROM meetings m
+                   WHERE EXISTS (SELECT 1 FROM chat_index c WHERE c.meeting_id = m.id)
+                     AND (SELECT COUNT(*) FROM chat_index c WHERE c.meeting_id = m.id)
+                       > (SELECT COUNT(*) FROM chat_vectors v WHERE v.meeting_id = m.id AND v.model = ?)
+                   ORDER BY m.started_at DESC""", (model,))]
+
+    def vector_models(self) -> list[tuple[str, int, int]]:
+        with self.connection() as db:
+            return [(r[0], r[1], r[2]) for r in db.execute(
+                "SELECT model, dim, COUNT(*) FROM chat_vectors GROUP BY model, dim")]
+
+    def drop_other_vectors(self, model: str, dim: int) -> int:
+        with self.connection() as db:
+            removed = db.execute("DELETE FROM chat_vectors WHERE model != ? OR dim != ?", (model, dim)).rowcount
+        if removed:
+            self.index_version += 1
+        return removed
+
+    def vector_counts(self, model: str) -> tuple[int, int]:
+        """(embedded, total indexed) for the configured model."""
+        with self.connection() as db:
+            total = db.execute("SELECT COUNT(*) FROM chat_index").fetchone()[0]
+            embedded = db.execute("SELECT COUNT(*) FROM chat_vectors WHERE model=?", (model,)).fetchone()[0]
+        return embedded, total
+
+    def rows_by_keys(self, keys: list[tuple[str, str, str]]) -> list[dict]:
+        """Index rows for the given (meeting_id, kind, ref) keys, in the order given."""
+        if not keys:
+            return []
+        placeholders = ",".join("(?,?,?)" for _ in keys)
+        args = [value for key in keys for value in key]
+        with self.connection() as db:
+            rows = [dict(row) for row in db.execute(
+                f"""SELECT c.meeting_id, c.kind, c.ref, c.heading, c.content, c.start, c.end,
+                           m.title, m.started_at
+                    FROM chat_index c JOIN meetings m ON m.id = c.meeting_id
+                    WHERE (c.meeting_id, c.kind, c.ref) IN (VALUES {placeholders})""", args)]
+        found = {(r["meeting_id"], r["kind"], r["ref"]): r for r in rows}
+        return [found[key] for key in keys if key in found]
 
     def reindex_all(self, only_missing: bool = True) -> int:
         """Backfill the index for meetings recorded before it existed."""
@@ -284,17 +410,22 @@ class Database:
         with self.connection() as db:
             rows = db.execute("SELECT * FROM chat_messages WHERE conversation_id=? ORDER BY created_at, rowid",
                               (conversation_id,)).fetchall()
-        return [{**dict(row), "sources": json.loads(row["sources"]) if row["sources"] else []} for row in rows]
+        return [{**dict(row),
+                 "sources": json.loads(row["sources"]) if row["sources"] else [],
+                 "web": json.loads(row["web"]) if row["web"] else []} for row in rows]
 
-    def add_message(self, conversation_id: str, role: str, content: str, sources: list | None = None) -> dict:
+    def add_message(self, conversation_id: str, role: str, content: str, sources: list | None = None,
+                    web: list | None = None) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         message_id = uuid.uuid4().hex[:12]
         with self.connection() as db:
-            db.execute("INSERT INTO chat_messages(id,conversation_id,role,content,sources,created_at) VALUES(?,?,?,?,?,?)",
-                       (message_id, conversation_id, role, content, json.dumps(sources or []), now))
+            db.execute("""INSERT INTO chat_messages(id,conversation_id,role,content,sources,web,created_at)
+                          VALUES(?,?,?,?,?,?,?)""",
+                       (message_id, conversation_id, role, content,
+                        json.dumps(sources or []), json.dumps(web or []), now))
             db.execute("UPDATE chat_conversations SET updated_at=? WHERE id=?", (now, conversation_id))
         return {"id": message_id, "conversation_id": conversation_id, "role": role, "content": content,
-                "sources": sources or [], "created_at": now}
+                "sources": sources or [], "web": web or [], "created_at": now}
 
     def rename_conversation(self, conversation_id: str, title: str) -> bool:
         with self.connection() as db:
@@ -390,6 +521,8 @@ class Database:
                 db.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
             db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
             db.execute("DELETE FROM chat_index WHERE meeting_id=?", (meeting_id,))
+            db.execute("DELETE FROM chat_vectors WHERE meeting_id=?", (meeting_id,))
+        self.index_version += 1
         return True
 
     def list_meetings(self, query=None):
@@ -482,4 +615,5 @@ class Database:
                 VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET
                 title=excluded.title,people_json=excluded.people_json,updated_at=excluded.updated_at""",
                 (meeting_id, clean_title, json.dumps(clean_people), now))
+        self.reindex_meeting(meeting_id)
         return self.get_meeting(meeting_id)

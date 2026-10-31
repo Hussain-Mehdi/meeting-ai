@@ -326,6 +326,27 @@ when none of its words appear in the question. Keyword search alone cannot do th
 "meeting" are words people say constantly inside transcripts, so searching for them returns
 whichever meeting happened to say them.
 
+**Semantic recall.** Alongside the keyword index, every passage is embedded by `nomic-embed-text`
+running in the same Ollama (no new Python runtime, no vector database). Vectors live in a
+`chat_vectors` table keyed to match the index rows, pre-normalised so similarity is a NumPy dot
+product: 4,478 passages is 13.8 MB and a query is well under a millisecond. Embedding the whole
+corpus took **33 seconds**; it runs in the background, newest meetings first, and pauses while a
+recording is in progress for the same reason transcription does. Re-embedding is incremental and
+keyed by content hash, so editing one transcript line re-embeds the two or three passages whose
+text actually changed rather than the meeting.
+
+The two result lists are fused by **Reciprocal Rank Fusion** (`backend/chat/fusion.py`, K=60).
+With one list the fusion is order-preserving, so `RETRIEVAL_MODE=bm25` reproduces the old
+behaviour exactly rather than approximating it — that is the rollback guarantee. If the embedding
+model is missing or Ollama is unreachable, dense search returns nothing and chat answers from
+keyword search alone.
+
+Measured on the real corpus: `forecasts` returned **0 hits** before and now returns the prediction
+discussion; across 330 paired questions built automatically from task and requested-change evidence
+quotes, hybrid lost **zero** of the results keyword search found. That proxy saturated (meeting-level
+recall@5 was 1.000 for both), so it proves the absence of regression rather than the size of the
+gain; the full paraphrase benchmark described in the plan was not run.
+
 **Retrieval.** For unscoped questions, the words are reduced to the meaningful ones (stopwords
 dropped, so "what should we do about predictions" ranks on *predictions*) and matched with BM25,
 newest meeting first among equal ranks.
@@ -341,12 +362,27 @@ an attendee. Ollama streams the reply, which the API forwards as server-sent eve
 (`start` → `sources` → `token`… → `done`). Only the citations the answer actually used are
 stored with the message and shown in the UI.
 
+### Web search (opt-in)
+
+The assistant can also search the web, for questions about things newer than the model. This is
+the only part of Meeting AI that sends anything off the machine, so the boundary is narrow:
+
+- It is **off by default** and switched on per message in the composer.
+- The query is the user's message **verbatim**. There is deliberately no query-rewriting step —
+  that absence is what makes "no meeting content leaves the machine" a property of the code.
+- The query text is never written to the log, and the UI shows the exact string that was sent.
+- Results get their own citation namespace, `[W1]`, a separate prompt block headed *external —
+  NOT from the meetings*, and a visually distinct card, so an internet claim can never quietly be
+  presented as something a meeting decided.
+- Backend is `ddgs` (no account, no API key). Any failure — rate limit, network, markup change —
+  returns no results and the answer comes from the meetings alone.
+
 **Conversations** are stored in `chat_conversations` / `chat_messages`, so history survives a
-reload. Everything stays on the machine.
+reload. Apart from an opted-in web search, everything stays on the machine.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/chat` | Ask a question; streams `text/event-stream` |
+| `POST` | `/chat` | Ask a question; streams `text/event-stream`. `web: true` additionally searches the web |
 | `GET` / `DELETE` / `PATCH` | `/chat/conversations[/{id}]` | List, read, delete, rename conversations |
 
 ## 8. Audio capture

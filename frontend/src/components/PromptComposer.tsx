@@ -6,7 +6,7 @@
  * and send chrome that reflects what can be sent. The placeholder is the textarea's own,
  * rather than an overlay, so it can never drift out of alignment with the text. */
 import {useEffect, useRef, useState} from 'react';
-import {ArrowUp, Square} from 'lucide-react';
+import {ArrowUp, Square, Globe} from 'lucide-react';
 import {cn} from '../lib/utils';
 
 const PLACEHOLDERS = [
@@ -16,12 +16,15 @@ const PLACEHOLDERS = [
   'Summarise the last meeting in three lines',
 ];
 
-export default function PromptComposer({onSend, busy, onStop, disabled, hint}: {
+export default function PromptComposer({onSend, busy, onStop, disabled, hint, web, setWeb, webAvailable}: {
   onSend: (value: string) => void;
   busy?: boolean;
   onStop?: () => void;
   disabled?: boolean;
   hint?: string;
+  web?: boolean;
+  setWeb?: (value: boolean) => void;
+  webAvailable?: boolean;
 }) {
   const [value, setValue] = useState('');
   const [placeholder, setPlaceholder] = useState(0);
@@ -62,9 +65,30 @@ export default function PromptComposer({onSend, busy, onStop, disabled, hint}: {
           className="block max-h-45 w-full px-4 pt-3.5 pb-1 text-[14px] leading-relaxed text-ink placeholder:text-ink-4"
         />
         <div className="flex items-center justify-between gap-3 px-2.5 pt-1 pb-2.5">
-          <span className="truncate pl-1.5 text-[11.5px] text-ink-4">
-            {hint || 'Enter to send · Shift+Enter for a new line'}
-          </span>
+          <div className="flex min-w-0 items-center gap-2.5">
+            {setWeb && (
+              /* The only control in the app that lets anything leave this machine, so it says
+                 exactly what it does and starts off. */
+              <button type="button" role="switch" aria-checked={!!web} disabled={!webAvailable}
+                onClick={() => setWeb(!web)}
+                title={webAvailable ? 'Also search the web. Only the words you type are sent.'
+                                    : 'Web search is unavailable'}
+                className={cn('group flex shrink-0 items-center gap-1.5 rounded-full border py-1 pr-2.5 pl-1 text-[11.5px] transition-colors',
+                  web ? 'border-green bg-green-tint text-green' : 'border-line text-ink-4 hover:text-ink-2',
+                  !webAvailable && 'cursor-not-allowed opacity-50')}>
+                <span className={cn('relative h-4 w-7 rounded-full transition-colors',
+                  web ? 'bg-green' : 'bg-inset')}>
+                  <span className={cn('absolute top-0.5 size-3 rounded-full bg-card shadow-sm transition-all',
+                    web ? 'left-3.5' : 'left-0.5')}/>
+                </span>
+                <Globe size={12}/>Web
+              </button>
+            )}
+            <span className="truncate text-[11.5px] text-ink-4">
+              {web ? 'Your message is sent to a search engine. Meeting content never is.'
+                   : (hint || 'Enter to send · Shift+Enter for a new line')}
+            </span>
+          </div>
           {busy ? (
             <button type="button" onClick={onStop} title="Stop generating"
               className="flex size-8 shrink-0 items-center justify-center rounded-full border border-line text-ink-2 hover:bg-inset">

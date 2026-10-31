@@ -1117,8 +1117,10 @@ def test_chat_endpoint_streams_sources_then_tokens_and_saves(tmp_path):
         llm = type("L", (), {"availability": staticmethod(lambda: {"available": True, "model_installed": True, "message": ""})})()
         def retrieve(self, question, meeting_id=None, limit=12): return db.search_index(question, limit=limit)
         def title_for(self, question): return question[:60]
-        def stream_answer(self, question, history, context, roster=""):
+        web = None
+        def stream_answer(self, question, history, context, roster="", web=""):
             assert "most recent" in roster or roster == ""     # the roster reaches generation
+            assert web == ""                                   # no web block unless asked for
             yield "Only one prediction at a time "
             yield "[1]."
 
@@ -1147,6 +1149,7 @@ def test_chat_endpoint_reports_when_ollama_is_down(tmp_path):
     db = _chat_db(tmp_path)
 
     class DownChat:
+        web = None
         llm = type("L", (), {"availability": staticmethod(lambda: {"available": False, "model_installed": False,
                                                                    "message": "Ollama is not running."})})()
     app = FastAPI(); app.include_router(create_router(db, object(), DownChat()))
@@ -1242,3 +1245,207 @@ def test_prompt_carries_the_roster_as_authoritative(tmp_path):
     assert "29 Oct 2026 (most recent)" in flat
     assert "never invent a meeting or a date that is not on it" in flat
     assert '"The last meeting" means the first row here' in flat
+
+
+def test_transcript_edits_refresh_the_chat_index_without_a_manual_reindex(tmp_path):
+    """The index used to go stale the moment a transcript was corrected: none of the edit
+    paths called reindex_meeting, so chat kept answering from the pre-edit wording."""
+    db = Database(tmp_path / "stale.db")
+    folder = tmp_path / "m"; folder.mkdir()
+    db.create_meeting("m", "Planning", "2026-10-29T17:00:00+05:00", folder / "recording.wav")
+    db.finish_recording("m", "2026-10-29T18:00:00+05:00", 600)
+    db.save_transcript("m", [
+        {"start": 0, "end": 4, "speaker": "Speaker 1", "text": "We will ship the flurb on Friday."},
+        {"start": 4, "end": 8, "speaker": "Speaker 2", "text": "Understood."},
+    ], folder / "transcript.json")
+    assert db.search_index("flurb")
+
+    # correcting a line  (note: no reindex_meeting call anywhere in this test)
+    segment_id = db.transcript("m")[0]["id"]
+    db.update_segment("m", segment_id, text="We will ship the overlay on Friday.")
+    assert not db.search_index("flurb")
+    assert db.search_index("overlay")
+
+    # renaming a speaker
+    db.rename_speaker("m", "Speaker 2", "Ayesha")
+    assert any("Ayesha" in (h["heading"] or "") for h in db.search_index("overlay"))
+
+    # deleting a line
+    remaining = db.transcript("m")[0]["id"]
+    db.delete_segment("m", remaining)
+    assert not db.search_index("overlay")
+
+
+def test_index_refs_are_unique_within_a_meeting(tmp_path):
+    """`ref` is half the identity the vector table keys on, so two rows must never share one."""
+    from backend.chat.index import meeting_rows
+    meeting = {
+        "id": "m", "summary": "A summary.",
+        # two goals whose first 40 characters are identical: the old fallback collapsed them
+        "goals": [{"id": None, "value": "Improve the scoreboard experience for everyone involved"},
+                  {"id": None, "value": "Improve the scoreboard experience for all of the fans"}],
+        "tasks": [{"id": None, "task": "Fix the logos"}, {"id": None, "task": "Fix the logos"}],
+        "people": [{"id": None, "name": "Ali"}, {"id": None, "name": "Ali"}],
+    }
+    segments = [{"id": None, "start": i, "end": i + 1, "speaker": "S", "text": f"line {i}"} for i in range(20)]
+    rows = meeting_rows(meeting, segments)
+    refs = [(r["kind"], r["ref"]) for r in rows]
+    assert len(refs) == len(set(refs))
+
+
+# ---------------------------------------------------------------- hybrid retrieval
+
+
+def test_rrf_preserves_a_single_ranking_exactly():
+    """The rollback guarantee: with no vector index the fusion is a no-op, so turning
+    semantic search off reproduces keyword search rather than approximating it."""
+    from backend.chat.fusion import reciprocal_rank_fusion
+    lexical = [{"meeting_id": "m", "kind": "transcript", "ref": str(i)} for i in range(5)]
+    assert reciprocal_rank_fusion([lexical], limit=5) == lexical
+    assert reciprocal_rank_fusion([lexical, []], limit=5) == lexical
+    assert reciprocal_rank_fusion([[], []], limit=5) == []
+
+
+def test_rrf_rewards_agreement_between_the_two_retrievers():
+    from backend.chat.fusion import reciprocal_rank_fusion
+    def row(ref): return {"meeting_id": "m", "kind": "transcript", "ref": ref}
+    # "b" is third in both lists; "a" is first in one and absent from the other.
+    fused = reciprocal_rank_fusion([[row("a"), row("x"), row("b")], [row("y"), row("z"), row("b")]], limit=3)
+    assert fused[0]["ref"] == "b"
+
+
+def test_embedding_model_prefixes_are_applied():
+    """nomic-embed-text is trained with task prefixes and loses accuracy without them."""
+    from backend.chat.embeddings import embed_text, prefixes
+    assert prefixes("nomic-embed-text") == ("search_query: ", "search_document: ")
+    assert prefixes("nomic-embed-text:latest") == ("search_query: ", "search_document: ")
+    assert prefixes("bge-m3") == ("", "")
+    assert embed_text({"heading": "Task", "content": "Fix the logos"}) == "Task\nFix the logos"
+
+
+def test_embedding_client_batches_and_never_raises():
+    import httpx
+    from backend.chat.embeddings import EmbeddingClient
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload["input"])
+        assert all(text.startswith("search_document: ") for text in payload["input"])
+        return httpx.Response(200, json={"embeddings": [[1.0, 0.0, 0.0]] * len(payload["input"])})
+
+    client = EmbeddingClient("http://localhost:11434", "nomic-embed-text", batch_size=16)
+    client.client = httpx.Client(transport=httpx.MockTransport(handler))
+    vectors = client.embed_documents([f"passage {i}" for i in range(40)])
+    assert len(vectors) == 40 and [len(batch) for batch in calls] == [16, 16, 8]
+    assert abs(float((vectors[0] ** 2).sum()) - 1.0) < 1e-6          # normalised for dot-product cosine
+
+    broken = EmbeddingClient("http://localhost:11434", "nomic-embed-text")
+    broken.client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404, json={})))
+    assert broken.embed_documents(["x"]) is None and broken.embed_query("x") is None   # never raises
+
+
+def test_chat_falls_back_to_keyword_search_when_embeddings_are_unavailable(tmp_path):
+    from backend.chat.service import ChatService
+    db = _chat_db(tmp_path)
+    class DeadIndex:
+        def search(self, *args, **kwargs): return []          # Ollama down / model not pulled
+    service = ChatService.__new__(ChatService)
+    from backend.config import get_settings
+    service.db = db; service.settings = get_settings(); service.vectors = DeadIndex()
+    assert service.retrieve("predictions", limit=5) == db.search_index("predictions", limit=5)
+
+
+def test_semantic_hits_cannot_escape_the_meeting_scope(tmp_path):
+    """Scope is resolved first and both retrievers are filtered by it: an unscoped vector
+    search would reopen the "answered about the wrong meeting" bug."""
+    from backend.chat.service import ChatService
+    db = Database(tmp_path / "scope3.db")
+    for meeting_id, when in [("old", "2026-10-01T10:00:00+05:00"), ("new", "2026-10-29T17:00:00+05:00")]:
+        folder = tmp_path / meeting_id; folder.mkdir()
+        db.create_meeting(meeting_id, meeting_id, when, folder / "r.wav")
+        db.finish_recording(meeting_id, when, 600)
+        db.save_transcript(meeting_id, [{"start": 0, "end": 5, "speaker": "H", "text": f"content of {meeting_id}"}],
+                           folder / "transcript.json")
+    class WrongMeetingIndex:
+        """Nearest neighbour always lives in the older meeting."""
+        def search(self, question, limit=30, meeting_id=None, meeting_ids=None):
+            allowed = [meeting_id] if meeting_id else (meeting_ids or ["old", "new"])
+            return db.meeting_passages("old", limit=3) if "old" in allowed else []
+    service = ChatService.__new__(ChatService)
+    from backend.config import get_settings
+    service.db = db; service.settings = get_settings(); service.vectors = WrongMeetingIndex()
+    assert {h["meeting_id"] for h in service.retrieve("recap the last meeting")} == {"new"}
+
+
+def test_vectors_follow_the_meeting_they_belong_to(tmp_path):
+    db = _chat_db(tmp_path)
+    rows = db.index_rows_with_hashes("m1", "nomic-embed-text")
+    assert rows and all(row["have_hash"] is None for row in rows)      # nothing embedded yet
+    db.replace_vectors("m1", "nomic-embed-text", 3,
+                       [(rows[0]["kind"], rows[0]["ref"], "hash1", b"\x00" * 12)])
+    assert db.vector_counts("nomic-embed-text") == (1, len(rows))
+    assert db.load_vectors("nomic-embed-text", 3)
+
+    assert db.drop_other_vectors("bge-m3", 1024) == 1                 # model change clears the old vectors
+    assert db.vector_counts("nomic-embed-text") == (0, len(rows))
+
+    db.replace_vectors("m1", "nomic-embed-text", 3,
+                       [(rows[0]["kind"], rows[0]["ref"], "hash1", b"\x00" * 12)])
+    db.delete_meeting("m1")
+    assert db.vector_counts("nomic-embed-text") == (0, 0)             # and with the meeting
+
+
+# ---------------------------------------------------------------- web search
+
+
+def test_web_search_sends_only_the_users_words(monkeypatch):
+    """The privacy guarantee: the outgoing query is the message, verbatim, and nothing else."""
+    import backend.web.search as web_module
+    from backend.web.search import WebSearch
+    sent = []
+
+    class FakeDDGS:
+        def __init__(self, **kwargs): pass
+        def text(self, query, max_results=5):
+            sent.append(query)
+            return [{"title": "Ollama releases", "href": "https://github.com/ollama/ollama/releases",
+                     "body": "Latest version notes."}]
+    monkeypatch.setitem(__import__("sys").modules, "ddgs", type("M", (), {"DDGS": FakeDDGS}))
+
+    settings = type("S", (), {"web_search_enabled": True, "web_search_results": 5, "web_search_timeout": 8.0})()
+    results = WebSearch(settings).search("What is the newest release of Ollama?")
+    assert sent == ["What is the newest release of Ollama?"]          # verbatim, no rewriting
+    assert results[0].domain == "github.com" and results[0].n == 1
+
+    # switched off, and empty input, must not reach the backend at all
+    off = type("S", (), {"web_search_enabled": False, "web_search_results": 5, "web_search_timeout": 8.0})()
+    assert WebSearch(off).search("anything") == [] and len(sent) == 1
+    assert WebSearch(settings).search("   ") == [] and len(sent) == 1
+
+
+def test_web_search_failure_never_breaks_a_chat_turn(monkeypatch):
+    from backend.web.search import WebSearch
+    class Exploding:
+        def __init__(self, **kwargs): pass
+        def text(self, *args, **kwargs): raise RuntimeError("rate limited")
+    monkeypatch.setitem(__import__("sys").modules, "ddgs", type("M", (), {"DDGS": Exploding}))
+    settings = type("S", (), {"web_search_enabled": True, "web_search_results": 5, "web_search_timeout": 8.0})()
+    search = WebSearch(settings)
+    assert search.search("anything") == []
+    assert "rate limited" in (search.last_error or "")
+
+
+def test_web_and_meeting_citations_stay_in_separate_namespaces():
+    from backend.chat.service import build_web_block, used_citations, used_web_citations
+    from backend.web.search import WebResult
+    meetings = [{"n": 1, "meeting_id": "m", "excerpt": "x"}, {"n": 2, "meeting_id": "m", "excerpt": "y"}]
+    web = [WebResult(1, "Ollama releases", "https://ollama.com", "notes", "ollama.com")]
+    answer = "Your meeting agreed this [1]. Separately, ollama.com reports a new version [W1]."
+    assert [s["n"] for s in used_citations(answer, meetings)] == [1]      # [W1] is not read as [1]
+    assert [w["n"] for w in used_web_citations(answer, web)] == [1]
+    assert used_web_citations("Only a meeting fact [1].", web) == []
+
+    block = build_web_block(web)
+    assert "NOT from the meetings" in block and "[W1] Ollama releases - ollama.com" in block
+    assert build_web_block([]) == ""                                      # nothing added when unused

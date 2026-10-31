@@ -54,6 +54,8 @@ def build_query(question: str) -> str:
 def _passages(segments: list[dict]) -> list[dict]:
     """Group transcript lines into overlapping passages, keeping speakers and timings."""
     values = []
+    # `ref` identifies a row for the whole lifetime of the index, including the vector table
+    # keyed on it, so the fallback carries the window position and can never collide.
     step = max(1, PASSAGE_LINES - PASSAGE_OVERLAP)
     for start in range(0, len(segments), step):
         window = segments[start:start + PASSAGE_LINES]
@@ -65,7 +67,7 @@ def _passages(segments: list[dict]) -> list[dict]:
             speakers = sorted({str(s.get("speaker")) for s in window if s.get("speaker")})
             values.append({
                 "kind": "transcript",
-                "ref": str(window[0].get("id") or start),
+                "ref": str(window[0].get("id") or f"w{start}"),
                 "heading": ", ".join(speakers)[:120],
                 "content": "\n".join(lines),
                 "start": float(window[0].get("start") or 0),
@@ -77,8 +79,20 @@ def _passages(segments: list[dict]) -> list[dict]:
 
 
 def meeting_rows(meeting: dict, segments: list[dict]) -> list[dict]:
-    """Every indexable passage for one meeting: its analysis claims and its transcript."""
+    """Every indexable passage for one meeting: its analysis claims and its transcript.
+
+    Each row's `ref` must be unique within the meeting: it is half the identity that the
+    chat index and the vector table share, so two rows sharing one would silently collapse
+    into a single vector. Items without an id fall back to their ordinal, not their text.
+    """
     rows: list[dict] = []
+    ordinal = 0
+
+    def unique(value, prefix: str) -> str:
+        nonlocal ordinal
+        ordinal += 1
+        return str(value) if value else f"{prefix}{ordinal}"
+
     if meeting.get("summary"):
         rows.append({"kind": "summary", "ref": "summary", "heading": "Summary",
                      "content": meeting["summary"], "start": 0.0, "end": 0.0})
@@ -87,7 +101,7 @@ def meeting_rows(meeting: dict, segments: list[dict]) -> list[dict]:
         for item in meeting.get(table) or []:
             value = str(item.get("value") or "").strip()
             if value:
-                rows.append({"kind": table, "ref": str(item.get("id") or value[:40]), "heading": heading,
+                rows.append({"kind": table, "ref": unique(item.get("id"), f"{table}-"), "heading": heading,
                              "content": value, "start": 0.0, "end": 0.0})
     for task in meeting.get("tasks") or []:
         text = str(task.get("task") or "").strip()
@@ -97,7 +111,7 @@ def meeting_rows(meeting: dict, segments: list[dict]) -> list[dict]:
         if task.get("owner"): parts.append(f"Owner: {task['owner']}")
         if task.get("deadline_original"): parts.append(f"Due: {task['deadline_original']}")
         if task.get("evidence"): parts.append(f"Evidence: {task['evidence']}")
-        rows.append({"kind": "task", "ref": str(task.get("id") or text[:40]), "heading": "Task",
+        rows.append({"kind": "task", "ref": unique(task.get("id"), "task-"), "heading": "Task",
                      "content": "\n".join(parts), "start": 0.0, "end": 0.0})
     for change in meeting.get("requested_changes") or []:
         text = str(change.get("change_text") or change.get("change") or "").strip()
@@ -106,12 +120,12 @@ def meeting_rows(meeting: dict, segments: list[dict]) -> list[dict]:
         parts = [text]
         if change.get("requested_of"): parts.append(f"Requested of: {change['requested_of']}")
         if change.get("evidence"): parts.append(f"Evidence: {change['evidence']}")
-        rows.append({"kind": "requested_change", "ref": str(change.get("id") or text[:40]),
+        rows.append({"kind": "requested_change", "ref": unique(change.get("id"), "change-"),
                      "heading": "Requested change", "content": "\n".join(parts), "start": 0.0, "end": 0.0})
     for person in meeting.get("people") or []:
         name = str(person.get("name") or "").strip()
         if name:
-            rows.append({"kind": "person", "ref": str(person.get("id") or name),
+            rows.append({"kind": "person", "ref": unique(person.get("id"), "person-"),
                          "heading": f"Person mentioned: {name}",
                          "content": f"{name}. {person.get('context') or ''}".strip(), "start": 0.0, "end": 0.0})
     rows.extend(_passages(segments))
