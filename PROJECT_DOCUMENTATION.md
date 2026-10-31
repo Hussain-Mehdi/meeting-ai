@@ -381,6 +381,13 @@ the only part of Meeting AI that sends anything off the machine, so the boundary
 - Backend is `ddgs` (no account, no API key). Any failure — rate limit, network, markup change —
   returns no results and the answer comes from the meetings alone.
 
+Answers render as rich text — bold, italics, inline code, links, bullet and numbered lists,
+headings, quotes and fenced code blocks — because that is what the model writes. The renderer
+(`frontend/src/components/RichText.tsx`) is written rather than pulled in: the hard part is
+interleaving `[1]` and `[W1]` citation chips with formatted text, which a general Markdown
+library hands back as plain strings to re-parse anyway. Anything it does not recognise renders
+as written, so a half-finished token mid-stream is never worse than the raw text.
+
 While an answer is being produced the chat shows the stages it is going through — searching,
 reading, writing — with the sites it is reading as circular logos. Those favicons are fetched
 from each result's **own domain**, never through a third-party favicon proxy, which would hand

@@ -1,12 +1,13 @@
 /* Ask questions about the meetings. Answers stream from the local model over SSE; the
  * citations in an answer are clickable and open the meeting they came from. */
-import {useEffect, useMemo, useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {motion} from 'motion/react';
 import {MessageSquarePlus, Trash2, FileText, Clock, Globe, ExternalLink} from 'lucide-react';
 import {api} from '../api';
 import PromptComposer from './PromptComposer';
 import SpeechBubble from './SpeechBubble';
 import SearchingIndicator, {type Stage} from './SearchingIndicator';
+import RichText from './RichText';
 import {cn} from '../lib/utils';
 
 type Source = {n: number; meeting_id: string; meeting_title: string; date: string; kind: string; heading?: string; start?: number; excerpt: string};
@@ -25,44 +26,39 @@ const clock = (seconds?: number) => {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
 
-/** Render [1]-style citations as buttons that jump to the matching source card.
- *  A citation keeps any punctuation that follows it on the same line, so an answer never
- *  wraps with a lone full stop at the start of the next line. */
+/** The assistant's answer: Markdown as the model wrote it, with [1] and [W1] rendered as
+ *  chips — meeting citations jump to their source card, web ones open the page. */
 function AnswerText({text, sources, web = [], onCite}: {text: string; sources: Source[]; web?: WebSource[]; onCite: (n: number) => void}) {
-  const parts = useMemo(() => text.split(/(\[W?\d{1,2}\][.,;:!?)]*)/gi), [text]);
-  return (
-    <div className="whitespace-pre-wrap break-words">
-      {parts.map((part, index) => {
-        const webMatch = /^\[W(\d{1,2})\]([.,;:!?)]*)$/i.exec(part);
-        if (webMatch) {
-          const result = web.find(w => w.n === Number(webMatch[1]));
-          if (!result) return <span key={index}>{part}</span>;
-          return (
-            <span key={index} className="whitespace-nowrap">
-              <a href={result.url} target="_blank" rel="noreferrer noopener" title={`${result.title} — ${result.domain}`}
-                className="mx-0.5 inline-flex h-4.5 items-center gap-0.5 rounded-full bg-inset px-1.5 align-[1px] text-[10.5px] font-semibold text-ink-2 hover:text-ink">
-                <Globe size={9}/>{result.n}
-              </a>
-              {webMatch[2]}
-            </span>
-          );
-        }
-        const match = /^\[(\d{1,2})\]([.,;:!?)]*)$/.exec(part);
-        const source = match && sources.find(s => s.n === Number(match[1]));
-        if (!source) return <span key={index}>{part}</span>;
-        return (
-          <span key={index} className="whitespace-nowrap">
-            <button type="button" onClick={() => onCite(source.n)}
-              title={`${source.meeting_title} · ${source.date}`}
-              className="mx-0.5 inline-flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-green-tint px-1 align-[1px] text-[10.5px] font-semibold text-green hover:opacity-80">
-              {source.n}
-            </button>
-            {match[2]}
-          </span>
-        );
-      })}
-    </div>
-  );
+  const citation = (token: string, key: string) => {
+    const webMatch = /^\[W(\d{1,2})\]([.,;:!?)]*)$/i.exec(token);
+    if (webMatch) {
+      const result = web.find(w => w.n === Number(webMatch[1]));
+      if (!result) return null;
+      return (
+        <span key={key} className="whitespace-nowrap">
+          <a href={result.url} target="_blank" rel="noreferrer noopener" title={`${result.title} — ${result.domain}`}
+            className="ml-0.5 inline-flex h-4.5 items-center gap-0.5 rounded-full bg-inset px-1.5 align-[1px] text-[10.5px] font-semibold text-ink-2 hover:text-ink">
+            <Globe size={9}/>{result.n}
+          </a>
+          {webMatch[2]}
+        </span>
+      );
+    }
+    const match = /^\[(\d{1,2})\]([.,;:!?)]*)$/.exec(token);
+    const source = match && sources.find(s => s.n === Number(match[1]));
+    if (!source) return null;
+    return (
+      <span key={key} className="whitespace-nowrap">
+        <button type="button" onClick={() => onCite(source.n)}
+          title={`${source.meeting_title} · ${source.date}`}
+          className="ml-0.5 inline-flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-green-tint px-1 align-[1px] text-[10.5px] font-semibold text-green hover:opacity-80">
+          {source.n}
+        </button>
+        {match[2]}
+      </span>
+    );
+  };
+  return <RichText text={text} citation={citation}/>;
 }
 
 function WebCard({result}: {result: WebSource}) {
